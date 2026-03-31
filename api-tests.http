@@ -1,0 +1,121 @@
+### =========================================
+### COGNIFY API ENDPOINT TESTS
+### =========================================
+### This file can be run natively inside IntelliJ IDEA or VS Code (with REST Client extension)
+### Click the green 'Run' button next to any endpoint to test it.
+
+@java_backend = http://localhost:8082/api
+@python_ai = http://localhost:8000/api/v1
+@accessToken = YOUR_JWT_TOKEN_HERE
+
+### ========================================
+### 1. JAVA SPRING BOOT API (FRONTEND FACING)
+### ========================================
+
+### 1a. Sign Up
+POST {{java_backend}}/auth/signup
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "SecurePass123!",
+  "name": "Test User"
+}
+
+### 1b. Login (Copy the accessToken from response to the variable at the top)
+POST {{java_backend}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "SecurePass123!"
+}
+
+### 1c. Create Conversation
+POST {{java_backend}}/conversations
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "title": "Machine Learning Research"
+}
+
+### 1d. Send Message (Triggers RAG & Python AI automatically)
+# Replace {conversationId} with the ID from step 1c
+POST {{java_backend}}/conversations/CONVERSATION_ID_HERE/messages
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "content": "What are the main topics discussed in the document?"
+}
+
+
+### ========================================
+### 2. PYTHON AI SERVICE (INTERNAL API)
+### ========================================
+### Note: These are usually called by the Java Backend, but you can test them directly.
+### Ensure the AI service is running on port 8000.
+
+### 2a. Test Document Processing (Mocks Java backend call)
+POST {{python_ai}}/process-document
+Content-Type: application/json
+
+{
+  "document_id": "123e4567-e89b-12d3-a456-426614174000",
+  "file_path": "/absolute/path/to/test-file.pdf",
+  "user_id": "123e4567-e89b-12d3-a456-426614174000",
+  "document_type": "PDF"
+}
+
+### Expected Response:
+# {
+#   "success": true,
+#   "document_id": "123e4567...",
+#   "chunks": [ { "chunk_id": "...", "content": "...", "chunk_index": 0, "page_number": 1, "token_count": 150 } ],
+#   "total_chunks": 1,
+#   "message": "Document processed successfully"
+# }
+
+
+### 2b. Test Vector Search (Retrieves relevant chunks)
+POST {{python_ai}}/search
+Content-Type: application/json
+
+{
+  "query": "What is machine learning?",
+  "user_id": "123e4567-e89b-12d3-a456-426614174000",
+  "top_k": 3
+}
+
+### Expected Response:
+# {
+#   "results": [
+#      { "chunk_id": "...", "document_id": "...", "document_name": "...", "content": "Text chunk here", "relevance_score": 0.89 }
+#   ],
+#   "query": "What is machine learning?",
+#   "total_results": 1
+# }
+
+
+### 2c. Test Local LLM Generation (Ollama)
+POST {{python_ai}}/rag/generate
+Content-Type: application/json
+
+{
+  "user_message": "What is machine learning?",
+  "context": "Context retrieved from the search endpoint goes here.",
+  "chat_history": [
+    {"role": "user", "content": "Hi there"},
+    {"role": "assistant", "content": "Hello! How can I help?"}
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000
+}
+
+### Expected Response:
+# {
+#   "response": "Based on the provided context, machine learning is a branch of artificial intelligence...",
+#   "model": "llama3",
+#   "processing_time": 2.5
+# }

@@ -19,17 +19,25 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import java.util.Map;
+import java.util.HashMap;
 
 /**
  * RAG (Retrieval-Augmented Generation) Service
  *
- * This service orchestrates the RAG pipeline:
- * 1. Retrieve relevant chunks from vector database
+ * This service acts as an orchestrator for the RAG pipeline by communicating
+ * directly with the dedicated Python AI Microservice (cognify-ai-service).
+ * 
+ * Pipeline:
+ * 1. Request relevant chunks from Python vector search API
  * 2. Build context from chunks
- * 3. Generate LLM response with context
- * 4. Save response with source citations
- *
- * TODO: Integrate with actual LLM and vector database
+ * 3. Request LLM response from Python generation API
+ * 4. Save assistant response with source citations securely in DB
  */
 @Service
 @RequiredArgsConstructor
@@ -40,16 +48,13 @@ public class RagService {
     private final MessageSourceRepository messageSourceRepository;
     private final ChunkRepository chunkRepository;
     private final DocumentRepository documentRepository;
-    // TODO: Inject VectorStoreService when implemented
-    // TODO: Inject LlmService when implemented
-    // TODO: Inject EmbeddingService when implemented
 
     @Transactional
     public MessageDto generateResponse(UUID conversationId, UUID userId, String userMessage) {
         log.info("Generating RAG response for conversation: {}", conversationId);
 
         try {
-            // Step 1: Retrieve relevant chunks (TODO: Use vector database)
+            // Step 1: Request relevant chunks from Python AI Service
             List<Chunk> relevantChunks = retrieveRelevantChunks(userId, userMessage);
             log.info("Retrieved {} relevant chunks", relevantChunks.size());
 
@@ -63,7 +68,7 @@ public class RagService {
                     .skip(Math.max(0, chatHistory.size() - 5))
                     .collect(Collectors.toList());
 
-            // Step 4: Generate LLM response (TODO: Use actual LLM)
+            // Step 4: Request LLM generation from Python AI Service
             String assistantResponse = generateLlmResponse(userMessage, context, recentHistory);
 
             // Step 5: Save assistant message
@@ -87,39 +92,43 @@ public class RagService {
     }
 
     /**
-     * Retrieve relevant chunks from vector database
-     *
-     * TODO: Replace with actual vector database query
-     * Currently returns all chunks as placeholder
+     * Retrieve relevant chunks from vector database via Python API
      */
     private List<Chunk> retrieveRelevantChunks(UUID userId, String query) {
         log.info("Retrieving relevant chunks for query: {}", query);
 
-        // TODO: Implement actual vector search
-        // 1. Generate embedding for query using EmbeddingService
-        // 2. Query vector database (Pinecone/Qdrant) with embedding
-        // 3. Filter by user_id to only search user's documents
-        // 4. Return top K chunks (e.g., K=5) with highest similarity scores
+        RestTemplate restTemplate = new RestTemplate();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("query", query);
+        requestBody.put("user_id", userId.toString());
+        requestBody.put("top_k", 5);
 
-        // PLACEHOLDER: Return limited chunks for now
-        List<UUID> userDocumentIds = documentRepository.findByUserId(userId, null)
-                .stream()
-                .map(Document::getId)
-                .collect(Collectors.toList());
-
-        if (userDocumentIds.isEmpty()) {
-            log.warn("No documents found for user: {}", userId);
-            return new ArrayList<>();
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+        
+        try {
+            ResponseEntity<Map> response = restTemplate.postForEntity(
+                    "http://localhost:8000/api/v1/search", 
+                    request, 
+                    Map.class
+            );
+            
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                List<Map<String, Object>> results = (List<Map<String, Object>>) response.getBody().get("results");
+                List<Chunk> chunks = new ArrayList<>();
+                for (Map<String, Object> res : results) {
+                    String chunkIdStr = (String) res.get("chunk_id");
+                    chunkRepository.findById(UUID.fromString(chunkIdStr)).ifPresent(chunks::add);
+                }
+                return chunks;
+            }
+        } catch(Exception e) {
+            log.error("Error calling Python search API", e);
         }
-
-        // Get first document's chunks as placeholder
-        UUID firstDocId = userDocumentIds.get(0);
-        List<Chunk> chunks = chunkRepository.findByDocumentIdOrderByChunkIndex(firstDocId);
-
-        // Return first 5 chunks as mock relevant results
-        return chunks.stream()
-                .limit(5)
-                .collect(Collectors.toList());
+        
+        return new ArrayList<>();
     }
 
     /**
@@ -150,35 +159,51 @@ public class RagService {
     }
 
     /**
-     * Generate LLM response with context
-     *
-     * TODO: Replace with actual LLM API call (OpenAI, Anthropic, etc.)
+     * Generate LLM response with context via Python API
      */
     private String generateLlmResponse(String userMessage, String context, List<Message> chatHistory) {
         log.info("Generating LLM response");
 
-        // TODO: Implement actual LLM call
-        // 1. Build system prompt for RAG
-        // 2. Add chat history for context
-        // 3. Add retrieved context
-        // 4. Add user message
-        // 5. Call LLM API (e.g., OpenAI ChatCompletion)
-        // 6. Return generated response
-
-        // PLACEHOLDER: Return mock response
         if (context.contains("No relevant context")) {
             return "I don't have any relevant information in your uploaded documents to answer that question. " +
                    "Could you please upload some documents first, or ask something else?";
         }
 
-        return String.format(
-                "Based on your documents, here's what I found:\n\n" +
-                "%s\n\n" +
-                "To answer your question: %s\n\n" +
-                "[This is a placeholder response. Integrate with OpenAI/Anthropic API to generate actual responses.]",
-                context.substring(0, Math.min(500, context.length())),
-                userMessage
-        );
+        RestTemplate restTemplate = new RestTemplate();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("user_message", userMessage);
+        requestBody.put("context", context);
+        
+        List<Map<String, String>> historyList = new ArrayList<>();
+        for (Message m : chatHistory) {
+            Map<String, String> msgMap = new HashMap<>();
+            msgMap.put("role", m.getSender() == Message.MessageSender.USER ? "user" : "assistant");
+            msgMap.put("content", m.getContent());
+            historyList.add(msgMap);
+        }
+        requestBody.put("chat_history", historyList);
+        requestBody.put("temperature", 0.7);
+        requestBody.put("max_tokens", 1000);
+
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+        try {
+            ResponseEntity<Map> response = restTemplate.postForEntity(
+                    "http://localhost:8000/api/v1/rag/generate", 
+                    request, 
+                    Map.class
+            );
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return (String) response.getBody().get("response");
+            }
+        } catch (Exception e) {
+            log.error("Error communicating with Python API for generation", e);
+            throw new RuntimeException("Failed to generate response via LLM API");
+        }
+        
+        return "I'm sorry, I couldn't generate a response at this time.";
     }
 
     /**

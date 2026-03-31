@@ -16,6 +16,14 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import java.util.Map;
+import java.util.HashMap;
+
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -39,36 +47,55 @@ public class DocumentProcessingService {
                 Document document = documentRepository.findById(documentId)
                         .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
 
-                // Step 1: Read file (placeholder - actual parsing will be done by Python service)
-                log.info("Step 1: Reading file from: {}", document.getStoragePath());
-                byte[] fileContent = fileStorageService.readFile(document.getStoragePath());
-                log.info("File read successfully, size: {} bytes", fileContent.length);
+                log.info("Step 1: Calling Python AI Service for processing");
+                
+                RestTemplate restTemplate = new RestTemplate();
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_JSON);
+                
+                Map<String, Object> requestBody = new HashMap<>();
+                requestBody.put("document_id", document.getId().toString());
+                requestBody.put("file_path", document.getStoragePath());
+                requestBody.put("user_id", document.getUserId().toString());
+                requestBody.put("document_type", document.getType().name());
 
-                // Step 2: Simulate text extraction (placeholder)
-                log.info("Step 2: Extracting text (placeholder)");
-                String extractedText = simulateTextExtraction(document.getType(), fileContent.length);
-
-                // Step 3: Simulate chunking (placeholder)
-                log.info("Step 3: Chunking text (placeholder)");
-                List<String> chunks = simulateChunking(extractedText);
-                log.info("Created {} chunks", chunks.size());
-
-                // Step 4: Simulate embedding generation (placeholder - will be done by Python service)
-                log.info("Step 4: Generating embeddings (placeholder)");
-                List<float[]> embeddings = simulateEmbeddingGeneration(chunks);
-
-                // Step 5: Save chunks to database
-                log.info("Step 5: Saving chunks to database");
-                saveChunks(document.getId(), chunks);
-
-                // Step 6: Update document status
-                log.info("Step 6: Updating document status");
-                document.setStatus(Document.DocumentStatus.INDEXED);
-                document.setChunksCount(chunks.size());
-                document.setIndexedAt(LocalDateTime.now());
-                document.setSummary(generatePlaceholderSummary(document.getName()));
-                document.setTags(new String[]{"placeholder", "pending-python-service"});
-                documentRepository.save(document);
+                HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+                
+                log.info("Sending request to Python API: {}", requestBody);
+                try {
+                    ResponseEntity<Map> response = restTemplate.postForEntity(
+                            "http://localhost:8000/api/v1/process-document", 
+                            request, 
+                            Map.class
+                    );
+                    
+                    if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                        Map<String, Object> body = response.getBody();
+                        boolean success = (Boolean) body.get("success");
+                        if (success) {
+                            int totalChunks = (Integer) body.get("total_chunks");
+                            log.info("Python service successfully processed document into {} chunks", totalChunks);
+                            
+                            List<Map<String, Object>> chunksListData = (List<Map<String, Object>>) body.get("chunks");
+                            saveChunks(document.getId(), chunksListData);
+                            
+                            // 2. Update document status
+                            document.setStatus(Document.DocumentStatus.INDEXED);
+                            document.setChunksCount(totalChunks);
+                            document.setIndexedAt(LocalDateTime.now());
+                            document.setSummary("Document processed and indexed successfully via Local AI Service.");
+                            document.setTags(new String[]{"processed", "local-ai"});
+                            documentRepository.save(document);
+                        } else {
+                            throw new RuntimeException("Python service returned success=false");
+                        }
+                    } else {
+                        throw new RuntimeException("Failed to get successful response from Python API");
+                    }
+                } catch (Exception e) {
+                    log.error("Error communicating with Python API", e);
+                    throw e;
+                }
 
                 log.info("Document processing completed successfully: {}", documentId);
 
@@ -79,117 +106,29 @@ public class DocumentProcessingService {
         });
     }
 
-    /**
-     * Placeholder for text extraction
-     * Will be replaced with actual Python service integration
-     */
-    private String simulateTextExtraction(Document.DocumentType type, int fileSize) {
-        // Simulate processing delay
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        return String.format(
-                "This is placeholder extracted text from a %s document with size %d bytes. " +
-                "When the Python service is integrated, this will contain the actual document content. " +
-                "The text extraction will use appropriate parsers: PyPDF2 for PDF, python-docx for DOCX, " +
-                "and standard file reading for TXT files. The extracted text will preserve structure, " +
-                "page boundaries, and metadata where applicable.",
-                type.name(), fileSize
-        );
-    }
-
-    /**
-     * Placeholder for chunking
-     * Will be replaced with semantic chunking via Python service
-     */
-    private List<String> simulateChunking(String text) {
-        List<String> chunks = new ArrayList<>();
-        int chunkSize = 512;
-        int overlap = 50;
-
-        // Simple chunking simulation
-        for (int i = 0; i < text.length(); i += (chunkSize - overlap)) {
-            int end = Math.min(i + chunkSize, text.length());
-            chunks.add(text.substring(i, end));
-        }
-
-        // If text is too short, create at least one chunk
-        if (chunks.isEmpty()) {
-            chunks.add(text);
-        }
-
-        return chunks;
-    }
-
-    /**
-     * Placeholder for embedding generation
-     * Will be replaced with actual embedding model (768 dimensions)
-     */
-    private List<float[]> simulateEmbeddingGeneration(List<String> chunks) {
-        List<float[]> embeddings = new ArrayList<>();
-
-        // Simulate delay
-        try {
-            Thread.sleep(500);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        // Create placeholder 768-dimensional embeddings
-        for (int i = 0; i < chunks.size(); i++) {
-            float[] embedding = new float[768];
-            // Fill with placeholder values
-            for (int j = 0; j < 768; j++) {
-                embedding[j] = (float) Math.random();
-            }
-            embeddings.add(embedding);
-        }
-
-        return embeddings;
-    }
-
-    /**
-     * Save chunks to database
-     */
-    private void saveChunks(UUID documentId, List<String> chunks) {
-        List<Chunk> chunkEntities = new ArrayList<>();
-
-        for (int i = 0; i < chunks.size(); i++) {
-            Chunk chunk = Chunk.builder()
+    private void saveChunks(UUID documentId, List<Map<String, Object>> chunksData) {
+        List<com.cognify.cognify_backend.entity.Chunk> chunkEntities = new ArrayList<>();
+        
+        for (Map<String, Object> data : chunksData) {
+            String chunkIdStr = (String) data.get("chunk_id");
+            String content = (String) data.get("content");
+            Integer chunkIndex = (Integer) data.get("chunk_index");
+            Integer pageNum = data.get("page_number") != null ? (Integer) data.get("page_number") : 1;
+            Integer tokenCount = data.get("token_count") != null ? (Integer) data.get("token_count") : 0;
+            
+            com.cognify.cognify_backend.entity.Chunk chunk = com.cognify.cognify_backend.entity.Chunk.builder()
+                    .id(UUID.fromString(chunkIdStr))
                     .documentId(documentId)
-                    .chunkIndex(i)
-                    .content(chunks.get(i))
-                    .pageNumber(calculatePageNumber(i))
-                    .tokenCount(estimateTokenCount(chunks.get(i)))
-                    .vectorId("placeholder_" + UUID.randomUUID()) // Will be replaced with actual vector DB ID
+                    .chunkIndex(chunkIndex)
+                    .content(content)
+                    .pageNumber(pageNum)
+                    .tokenCount(tokenCount)
+                    .vectorId(chunkIdStr)
                     .build();
             chunkEntities.add(chunk);
         }
-
+        
         chunkRepository.saveAll(chunkEntities);
-    }
-
-    private int calculatePageNumber(int chunkIndex) {
-        // Estimate page number (assuming ~2-3 chunks per page)
-        return (chunkIndex / 2) + 1;
-    }
-
-    private int estimateTokenCount(String text) {
-        // Rough estimate: 1 token ≈ 4 characters
-        return text.length() / 4;
-    }
-
-    private String generatePlaceholderSummary(String documentName) {
-        return String.format(
-                "Placeholder summary for '%s'. " +
-                "This document has been successfully processed and indexed. " +
-                "When the Python service is integrated, this will contain an AI-generated summary " +
-                "highlighting key points, main topics, and important information from the document.",
-                documentName
-        );
     }
 
     @Transactional

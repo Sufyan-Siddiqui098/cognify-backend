@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import VectorStore
-from app.services.llm_service import LLMService
+from app.services.llm_service import LLMService, LLMUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,22 @@ class RAGService:
         max_tokens: int = 1000
     ) -> Dict:
         logger.info("Generating RAG response (LOCAL)")
-        result = await self.llm_service.generate_response(
-            user_message, context, chat_history, temperature, max_tokens
-        )
-        return result
+        try:
+            result = await self.llm_service.generate_response(
+                user_message, context, chat_history, temperature, max_tokens
+            )
+            return result
+        except LLMUnavailableError as e:
+            logger.warning("LLM unavailable (%s). Returning context-based fallback response.", e)
+            return {
+                "response": (
+                    "I found relevant information in your documents, but the AI summary service is "
+                    "temporarily unavailable.\n\n" + context
+                ),
+                "model": "fallback-context",
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }

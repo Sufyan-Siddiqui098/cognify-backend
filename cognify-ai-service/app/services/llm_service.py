@@ -7,6 +7,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+class LLMUnavailableError(Exception):
+    """Raised when Ollama is unreachable or times out."""
+    pass
+
 class LLMService:
     def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.2"):
         self.ollama_url = ollama_url
@@ -38,7 +43,7 @@ class LLMService:
                         "num_predict": max_tokens
                     }
                 },
-                timeout=120  # 2 minutes timeout for local generation
+                timeout=(5, 120)  # fast connect timeout, slower read timeout
             )
             
             if response.status_code != 200:
@@ -55,6 +60,12 @@ class LLMService:
                     "total_tokens": result.get('prompt_eval_count', 0) + result.get('eval_count', 0)
                 }
             }
+        except requests.exceptions.ConnectionError as e:
+            logger.warning("Ollama unavailable at %s: %s", self.ollama_url, e)
+            raise LLMUnavailableError("OLLAMA_UNAVAILABLE") from e
+        except requests.exceptions.Timeout as e:
+            logger.warning("Ollama request timeout at %s: %s", self.ollama_url, e)
+            raise LLMUnavailableError("OLLAMA_TIMEOUT") from e
         except Exception as e:
             logger.error(f"LLM generation error: {e}")
             raise

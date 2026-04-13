@@ -121,6 +121,9 @@ public class DocumentService {
             )
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
+        // Remove existing vectors first to avoid stale Qdrant hits after reindex.
+        processingService.deleteVectorsForDocument(documentId, userPrincipal.getId());
+
         // Reset status
         document.setStatus(Document.DocumentStatus.PROCESSING);
         document.setChunksCount(0);

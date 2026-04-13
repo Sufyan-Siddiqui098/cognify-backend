@@ -2,8 +2,11 @@ package com.cognify.cognify_backend.service;
 
 import com.cognify.cognify_backend.dto.ConversationDto;
 import com.cognify.cognify_backend.entity.Conversation;
+import com.cognify.cognify_backend.entity.Document;
+import com.cognify.cognify_backend.exception.BadRequestException;
 import com.cognify.cognify_backend.exception.ResourceNotFoundException;
 import com.cognify.cognify_backend.repository.ConversationRepository;
+import com.cognify.cognify_backend.repository.DocumentRepository;
 import com.cognify.cognify_backend.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,10 +26,18 @@ public class ConversationService {
 
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
+    private final DocumentRepository documentRepository;
 
     @Transactional
     public ConversationDto createConversation(UUID userId, String title) {
         log.info("Creating conversation for user: {}", userId);
+
+        long documentCount = documentRepository.countByUserIdAndStatusNot(userId, Document.DocumentStatus.DELETED);
+        if (documentCount == 0) {
+            throw new BadRequestException(
+                    "Please upload at least one document before starting a conversation."
+            );
+        }
 
         Conversation conversation = Conversation.builder()
                 .userId(userId)

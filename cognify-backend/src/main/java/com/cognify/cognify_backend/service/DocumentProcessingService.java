@@ -1,5 +1,6 @@
 package com.cognify.cognify_backend.service;
 
+import com.cognify.cognify_backend.config.AiServiceConfig;
 import com.cognify.cognify_backend.entity.Chunk;
 import com.cognify.cognify_backend.entity.Document;
 import com.cognify.cognify_backend.repository.ChunkRepository;
@@ -22,8 +23,13 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import java.util.Map;
-import java.util.HashMap;
+import org.springframework.web.client.HttpStatusCodeException;
 
+/**
+ * Async document processing service.
+ * Calls the Python AI microservice to extract text, chunk, embed, and store vectors.
+ * Saves chunk metadata to PostgreSQL for reference by the RAG pipeline.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -32,92 +38,129 @@ public class DocumentProcessingService {
     private final DocumentRepository documentRepository;
     private final ChunkRepository chunkRepository;
     private final FileStorageService fileStorageService;
+    private final RestTemplate restTemplate;
+    private final AiServiceConfig aiServiceConfig;
 
     /**
-     * Process document asynchronously using CompletableFuture
-     * This simulates the processing pipeline without Python service for now
+     * Process document asynchronously via the Python AI microservice.
+     * Pipeline: file → Python (extract → chunk → embed → Qdrant) → save chunk metadata to DB.
      */
     @Async("taskExecutor")
-    @Transactional
     public CompletableFuture<Void> processDocumentAsync(UUID documentId) {
         log.info("Starting async processing for document: {}", documentId);
 
-        return CompletableFuture.runAsync(() -> {
-            try {
-                Document document = documentRepository.findById(documentId)
-                        .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
+        try {
+            Document document = documentRepository.findById(documentId)
+                    .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
 
-                log.info("Step 1: Calling Python AI Service for processing");
-                
-                RestTemplate restTemplate = new RestTemplate();
-                HttpHeaders headers = new HttpHeaders();
-                headers.setContentType(MediaType.APPLICATION_JSON);
-                
-                Map<String, Object> requestBody = new HashMap<>();
-                requestBody.put("document_id", document.getId().toString());
-                requestBody.put("file_path", document.getStoragePath());
-                requestBody.put("user_id", document.getUserId().toString());
-                requestBody.put("document_type", document.getType().name());
+            log.info("Calling Python AI Service for document processing");
 
-                HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-                
-                log.info("Sending request to Python API: {}", requestBody);
-                try {
-                    ResponseEntity<Map> response = restTemplate.postForEntity(
-                            "http://localhost:8000/api/v1/process-document", 
-                            request, 
-                            Map.class
-                    );
-                    
-                    if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                        Map<String, Object> body = response.getBody();
-                        boolean success = (Boolean) body.get("success");
-                        if (success) {
-                            int totalChunks = (Integer) body.get("total_chunks");
-                            log.info("Python service successfully processed document into {} chunks", totalChunks);
-                            
-                            List<Map<String, Object>> chunksListData = (List<Map<String, Object>>) body.get("chunks");
-                            saveChunks(document.getId(), chunksListData);
-                            
-                            // 2. Update document status
-                            document.setStatus(Document.DocumentStatus.INDEXED);
-                            document.setChunksCount(totalChunks);
-                            document.setIndexedAt(LocalDateTime.now());
-                            document.setSummary("Document processed and indexed successfully via Local AI Service.");
-                            document.setTags(new String[]{"processed", "local-ai"});
-                            documentRepository.save(document);
-                        } else {
-                            throw new RuntimeException("Python service returned success=false");
-                        }
-                    } else {
-                        throw new RuntimeException("Failed to get successful response from Python API");
-                    }
-                } catch (Exception e) {
-                    log.error("Error communicating with Python API", e);
-                    throw e;
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+                ProcessDocumentPayload requestBody = new ProcessDocumentPayload(
+                    document.getId().toString(),
+                    document.getStoragePath(),
+                    document.getUserId().toString(),
+                    document.getType().name()
+                );
+                HttpEntity<ProcessDocumentPayload> request = new HttpEntity<>(requestBody, headers);
+
+            String processUrl = aiServiceConfig.getUrl() + "/api/v1/process-document";
+            log.info("Sending request to Python API: {}", processUrl);
+                log.debug("Process payload documentId={}, userId={}, type={}, filePath={} ",
+                    requestBody.document_id(), requestBody.user_id(), requestBody.document_type(), requestBody.file_path());
+
+            ResponseEntity<Map> response = restTemplate.postForEntity(processUrl, request, Map.class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                Map<String, Object> body = response.getBody();
+                boolean success = (Boolean) body.get("success");
+                if (success) {
+                    Number totalChunksNumber = (Number) body.get("total_chunks");
+                    int totalChunks = totalChunksNumber != null ? totalChunksNumber.intValue() : 0;
+                    log.info("Python service processed document into {} chunks", totalChunks);
+
+                    List<Map<String, Object>> chunksListData = (List<Map<String, Object>>) body.get("chunks");
+                    saveChunks(document.getId(), chunksListData);
+
+                    // Update document status to INDEXED
+                    document.setStatus(Document.DocumentStatus.INDEXED);
+                    document.setChunksCount(totalChunks);
+                    document.setIndexedAt(LocalDateTime.now());
+                    document.setSummary("Document processed and indexed successfully via Local AI Service.");
+                    document.setTags(new String[]{"processed", "local-ai"});
+                    documentRepository.save(document);
+                } else {
+                    throw new RuntimeException("Python service returned success=false");
                 }
-
-                log.info("Document processing completed successfully: {}", documentId);
-
-            } catch (Exception e) {
-                log.error("Error processing document: {}", documentId, e);
-                markDocumentAsFailed(documentId, e.getMessage());
+            } else {
+                throw new RuntimeException("Failed to get successful response from Python API");
             }
-        });
+
+            log.info("Document processing completed: {}", documentId);
+
+        } catch (HttpStatusCodeException e) {
+            log.error("AI service returned {} for document {}. Response body: {}",
+                    e.getStatusCode(), documentId, e.getResponseBodyAsString(), e);
+            markDocumentAsFailed(documentId, e.getMessage());
+        } catch (Exception e) {
+            log.error("Error processing document: {}", documentId, e);
+            markDocumentAsFailed(documentId, e.getMessage());
+        }
+
+        return CompletableFuture.completedFuture(null);
     }
 
-    private void saveChunks(UUID documentId, List<Map<String, Object>> chunksData) {
-        List<com.cognify.cognify_backend.entity.Chunk> chunkEntities = new ArrayList<>();
-        
+    /**
+     * Delete vectors from Qdrant via Python AI service.
+     * Called when a user deletes a document to clean up orphaned vectors.
+     */
+    public void deleteVectorsForDocument(UUID documentId, UUID userId) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+                DeleteVectorsPayload requestBody = new DeleteVectorsPayload(
+                    documentId.toString(),
+                    userId.toString()
+                );
+                HttpEntity<DeleteVectorsPayload> request = new HttpEntity<>(requestBody, headers);
+
+            String deleteUrl = aiServiceConfig.getUrl() + "/api/v1/delete-vectors";
+            log.info("Deleting vectors for document: {}", documentId);
+                log.debug("Delete payload documentId={}, userId={}", requestBody.document_id(), requestBody.user_id());
+
+            restTemplate.postForEntity(deleteUrl, request, Map.class);
+            log.info("Vectors deleted for document: {}", documentId);
+        } catch (HttpStatusCodeException e) {
+            log.warn("Failed to delete vectors from Qdrant for document: {}. AI response {} body={}",
+                    documentId, e.getStatusCode(), e.getResponseBodyAsString(), e);
+            // Non-fatal: we still proceed with DB deletion
+        } catch (Exception e) {
+            log.warn("Failed to delete vectors from Qdrant for document: {}. Vectors may be orphaned.", documentId, e);
+            // Non-fatal: we still proceed with DB deletion
+        }
+    }
+
+    @Transactional
+    protected void saveChunks(UUID documentId, List<Map<String, Object>> chunksData) {
+        List<Chunk> chunkEntities = new ArrayList<>();
+
         for (Map<String, Object> data : chunksData) {
             String chunkIdStr = (String) data.get("chunk_id");
             String content = (String) data.get("content");
-            Integer chunkIndex = (Integer) data.get("chunk_index");
-            Integer pageNum = data.get("page_number") != null ? (Integer) data.get("page_number") : 1;
-            Integer tokenCount = data.get("token_count") != null ? (Integer) data.get("token_count") : 0;
-            
-            com.cognify.cognify_backend.entity.Chunk chunk = com.cognify.cognify_backend.entity.Chunk.builder()
-                    .id(UUID.fromString(chunkIdStr))
+            Number chunkIndexNum = (Number) data.get("chunk_index");
+            Number pageNumNum = (Number) data.get("page_number");
+            Number tokenCountNum = (Number) data.get("token_count");
+
+            int chunkIndex = chunkIndexNum != null ? chunkIndexNum.intValue() : 0;
+            int pageNum = pageNumNum != null ? pageNumNum.intValue() : 1;
+            int tokenCount = tokenCountNum != null ? tokenCountNum.intValue() : 0;
+
+            Chunk chunk = Chunk.builder()
                     .documentId(documentId)
                     .chunkIndex(chunkIndex)
                     .content(content)
@@ -127,16 +170,33 @@ public class DocumentProcessingService {
                     .build();
             chunkEntities.add(chunk);
         }
-        
+
         chunkRepository.saveAll(chunkEntities);
+        log.info("Saved {} chunks to database", chunkEntities.size());
     }
 
+    /**
+     * Mark a document as failed after processing error.
+     * Uses a separate transaction via self-invocation pattern.
+     */
     @Transactional
-    private void markDocumentAsFailed(UUID documentId, String errorMessage) {
+    protected void markDocumentAsFailed(UUID documentId, String errorMessage) {
         documentRepository.findById(documentId).ifPresent(document -> {
             document.setStatus(Document.DocumentStatus.FAILED);
             document.setSummary("Processing failed: " + errorMessage);
             documentRepository.save(document);
         });
     }
+
+    private record ProcessDocumentPayload(
+            String document_id,
+            String file_path,
+            String user_id,
+            String document_type
+    ) {}
+
+    private record DeleteVectorsPayload(
+            String document_id,
+            String user_id
+    ) {}
 }

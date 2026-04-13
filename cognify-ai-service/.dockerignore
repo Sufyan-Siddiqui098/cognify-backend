@@ -1,0 +1,25 @@
+# Git and editor metadata
+.git
+.gitignore
+.idea
+.vscode
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Runtime/generated data that should never be part of image build context
+logs/
+ollama_data/
+qdrant_storage/
+
+# Local-only artifacts
+tests/
+*.log
+.env

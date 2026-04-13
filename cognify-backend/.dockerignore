@@ -1,0 +1,19 @@
+# VCS and IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# Build output and caches
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# Local scripts/docs not needed in runtime image
+*.log
+*.png
+*.jpg
+*.jpeg
+uml.*
+STATUS.txt
+verify-fixes.ps1
+reload-project.ps1

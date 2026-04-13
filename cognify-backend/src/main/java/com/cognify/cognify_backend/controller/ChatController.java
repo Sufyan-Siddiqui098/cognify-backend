@@ -12,7 +12,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -62,7 +61,7 @@ public class ChatController {
      * GET /api/conversations?page=0&size=20
      */
     @GetMapping
-    public ResponseEntity<ApiResponse<Page<ConversationDto>>> getConversations(
+        public ResponseEntity<ApiResponse<PaginatedResponse<ConversationDto>>> getConversations(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal UserPrincipal userPrincipal) {
@@ -75,7 +74,7 @@ public class ChatController {
                 size
         );
 
-        return ResponseEntity.ok(ApiResponse.success(conversations));
+        return ResponseEntity.ok(ApiResponse.success(PaginatedResponse.from(conversations)));
     }
 
     /**
@@ -118,24 +117,50 @@ public class ChatController {
         ));
     }
 
+        /**
+         * Rename a conversation title.
+         *
+         * PATCH /api/conversations/{id}
+         */
+        @PatchMapping("/{id}")
+        public ResponseEntity<ApiResponse<ConversationDto>> renameConversation(
+                        @PathVariable UUID id,
+                        @Valid @RequestBody UpdateConversationRequest request,
+                        @AuthenticationPrincipal UserPrincipal userPrincipal) {
+
+                log.info("Renaming conversation: {} for user: {}", id, userPrincipal.getId());
+
+                ConversationDto conversation = conversationService.updateConversationTitle(
+                                id,
+                                userPrincipal.getId(),
+                                request.getTitle()
+                );
+
+                return ResponseEntity.ok(ApiResponse.success(conversation, "Conversation renamed successfully"));
+        }
+
     /**
      * Get all messages in a conversation
      *
-     * GET /api/conversations/{id}/messages
+     * GET /api/conversations/{id}/messages?page=0&size=20
      */
     @GetMapping("/{id}/messages")
-    public ResponseEntity<ApiResponse<List<MessageDto>>> getMessages(
+        public ResponseEntity<ApiResponse<PaginatedResponse<MessageDto>>> getMessages(
             @PathVariable UUID id,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal UserPrincipal userPrincipal) {
 
         log.info("Fetching messages for conversation: {}", id);
 
-        List<MessageDto> messages = chatService.getConversationMessages(
+        Page<MessageDto> messages = chatService.getConversationMessages(
                 id,
-                userPrincipal.getId()
+                userPrincipal.getId(),
+                page,
+                size
         );
 
-        return ResponseEntity.ok(ApiResponse.success(messages));
+        return ResponseEntity.ok(ApiResponse.success(PaginatedResponse.from(messages)));
     }
 
     /**

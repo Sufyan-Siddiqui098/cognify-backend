@@ -58,6 +58,9 @@ public class Document {
     @Column(name = "indexed_at")
     private LocalDateTime indexedAt;
 
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -71,6 +74,6 @@ public class Document {
     }
 
     public enum DocumentStatus {
-        PROCESSING, INDEXED, FAILED
+        PROCESSING, INDEXED, FAILED, DELETED
     }
 }

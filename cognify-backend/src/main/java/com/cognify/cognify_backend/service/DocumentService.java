@@ -13,14 +13,14 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 
 @Service
 @RequiredArgsConstructor
@@ -57,8 +57,8 @@ public class DocumentService {
         document = documentRepository.save(document);
         log.info("Document created with ID: {}", document.getId());
 
-        // Trigger async processing
-        processingService.processDocumentAsync(document.getId());
+        // Trigger async processing only after DB commit to avoid race conditions.
+        triggerAsyncProcessingAfterCommit(document.getId());
 
         return mapToDto(document);
     }
@@ -67,36 +67,58 @@ public class DocumentService {
         Sort.Direction direction = sortOrder.equalsIgnoreCase("asc") ? Sort.Direction.ASC : Sort.Direction.DESC;
         Pageable pageable = PageRequest.of(page, size, Sort.by(direction, sortBy));
 
-        Page<Document> documents = documentRepository.findByUserId(userPrincipal.getId(), pageable);
+        Page<Document> documents = documentRepository.findByUserIdAndStatusNot(
+            userPrincipal.getId(),
+            Document.DocumentStatus.DELETED,
+            pageable
+        );
         return documents.map(this::mapToDto);
     }
 
     public DocumentDto getDocument(UUID documentId, UserPrincipal userPrincipal) {
-        Document document = documentRepository.findByIdAndUserId(documentId, userPrincipal.getId())
+        Document document = documentRepository.findByIdAndUserIdAndStatusNot(
+                documentId,
+                userPrincipal.getId(),
+                Document.DocumentStatus.DELETED
+            )
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
         return mapToDto(document);
     }
 
     @Transactional
     public void deleteDocument(UUID documentId, UserPrincipal userPrincipal) {
-        Document document = documentRepository.findByIdAndUserId(documentId, userPrincipal.getId())
+        Document document = documentRepository.findByIdAndUserIdAndStatusNot(
+                documentId,
+                userPrincipal.getId(),
+                Document.DocumentStatus.DELETED
+            )
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
-        // Delete chunks
+        // Remove vectors from Qdrant via Python AI service
+        processingService.deleteVectorsForDocument(documentId, userPrincipal.getId());
+
+        // Delete chunks from PostgreSQL
         chunkRepository.deleteByDocumentId(documentId);
 
-        // Delete file
+        // Delete stored file from disk
         fileStorageService.deleteFile(document.getStoragePath());
 
-        // Delete document
-        documentRepository.delete(document);
+        // Soft delete document record
+        document.setStatus(Document.DocumentStatus.DELETED);
+        document.setDeletedAt(LocalDateTime.now());
+        document.setSummary("Document deleted by user");
+        documentRepository.save(document);
 
-        log.info("Document deleted: {}", documentId);
+        log.info("Document soft-deleted (DB + Qdrant + file): {}", documentId);
     }
 
     @Transactional
     public DocumentDto reindexDocument(UUID documentId, UserPrincipal userPrincipal) {
-        Document document = documentRepository.findByIdAndUserId(documentId, userPrincipal.getId())
+        Document document = documentRepository.findByIdAndUserIdAndStatusNot(
+                documentId,
+                userPrincipal.getId(),
+                Document.DocumentStatus.DELETED
+            )
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
         // Reset status
@@ -108,8 +130,8 @@ public class DocumentService {
         // Delete existing chunks
         chunkRepository.deleteByDocumentId(documentId);
 
-        // Trigger async processing
-        processingService.processDocumentAsync(documentId);
+        // Trigger async processing only after DB commit to avoid race conditions.
+        triggerAsyncProcessingAfterCommit(documentId);
 
         return mapToDto(document);
     }
@@ -121,6 +143,21 @@ public class DocumentService {
             case "txt" -> Document.DocumentType.TXT;
             default -> throw new IllegalArgumentException("Unsupported file type: " + extension);
         };
+    }
+
+    private void triggerAsyncProcessingAfterCommit(UUID documentId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    processingService.processDocumentAsync(documentId);
+                }
+            });
+            return;
+        }
+
+        // Fallback for non-transactional contexts.
+        processingService.processDocumentAsync(documentId);
     }
 
     private DocumentDto mapToDto(Document document) {

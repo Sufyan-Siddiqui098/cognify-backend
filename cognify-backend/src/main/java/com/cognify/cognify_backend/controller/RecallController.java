@@ -1,46 +1,32 @@
 package com.cognify.cognify_backend.controller;
 
 import com.cognify.cognify_backend.dto.ApiResponse;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
-import java.util.Map;
-
+/**
+ * RecallController — DEPRECATED.
+ * 
+ * Recall functionality has been merged into the Chat system.
+ * Semantic search is now handled through:
+ * - POST /api/conversations/{id}/messages (sends query, triggers RAG pipeline)
+ * - GET /api/conversations/{id}/messages (retrieves results with source citations)
+ *
+ * This controller exists only for backwards compatibility with existing bookmarks/links.
+ * New clients should use the Chat API.
+ */
 @RestController
 @RequestMapping("/api/recall")
-@RequiredArgsConstructor
+@Deprecated
 public class RecallController {
 
     /**
-     * Placeholder for semantic search endpoint
-     * Will be implemented when Python service is ready
+     * Search endpoint — redirects clients to use Chat API instead.
      */
     @PostMapping("/search")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> search(@RequestBody Map<String, Object> request) {
-        Map<String, Object> placeholderResponse = new HashMap<>();
-        placeholderResponse.put("message", "Recall service is not yet integrated. This endpoint will perform semantic search once the Python service is ready.");
-        placeholderResponse.put("query", request.get("query"));
-        placeholderResponse.put("results", new Object[]{});
-        placeholderResponse.put("status", "pending_python_service");
-
-        return ResponseEntity.ok(ApiResponse.success(placeholderResponse,
-                "Python service integration pending"));
-    }
-
-    /**
-     * Placeholder for feedback endpoint
-     */
-    @PostMapping("/{id}/feedback")
-    public ResponseEntity<ApiResponse<Map<String, String>>> submitFeedback(
-            @PathVariable String id,
-            @RequestBody Map<String, Object> feedback) {
-
-        Map<String, String> response = new HashMap<>();
-        response.put("message", "Feedback endpoint will be active once Python service is integrated");
-        response.put("resultId", id);
-
-        return ResponseEntity.ok(ApiResponse.success(response));
+    public ResponseEntity<ApiResponse<Void>> search() {
+        return ResponseEntity.ok(ApiResponse.success(null,
+                "Recall has been integrated into the Chat system. " +
+                "Please use POST /api/conversations/{id}/messages to perform semantic search."));
     }
 }

@@ -39,6 +39,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String jwt = getJwtFromRequest(request);
 
             if (StringUtils.hasText(jwt)) {
+                if (!isTokenStructurallyValid(jwt)) {
+                    log.debug("Skipping malformed JWT for path {}", path);
+                    filterChain.doFilter(request, response);
+                    return;
+                }
+
                 String username = tokenProvider.extractUsername(jwt);
 
                 if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
@@ -53,7 +59,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 }
             }
         } catch (Exception ex) {
-            log.error("Could not set user authentication in security context", ex);
+            log.warn("Could not set user authentication in security context: {}", ex.getMessage());
         }
 
         filterChain.doFilter(request, response);
@@ -69,8 +75,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private String getJwtFromRequest(HttpServletRequest request) {
         String bearerToken = request.getHeader("Authorization");
         if (StringUtils.hasText(bearerToken) && bearerToken.startsWith("Bearer ")) {
-            return bearerToken.substring(7);
+            String token = bearerToken.substring(7).trim();
+            if (!StringUtils.hasText(token) || "null".equalsIgnoreCase(token) || "undefined".equalsIgnoreCase(token)) {
+                return null;
+            }
+            return token;
         }
         return null;
+    }
+
+    private boolean isTokenStructurallyValid(String token) {
+        return token.chars().filter(ch -> ch == '.').count() == 2;
     }
 }

@@ -10,10 +10,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
 import java.util.UUID;
 
 @Service
@@ -101,6 +103,69 @@ public class FileStorageService {
         if (contentType == null || !storageConfig.getAllowedTypes().contains(contentType)) {
             throw new FileStorageException("File type not allowed. Allowed types: " + storageConfig.getAllowedTypes());
         }
+
+        validateFileSignature(file, contentType);
+    }
+
+    private void validateFileSignature(MultipartFile file, String contentType) {
+        byte[] header = new byte[16];
+        int read;
+
+        try (InputStream inputStream = file.getInputStream()) {
+            read = inputStream.read(header);
+        } catch (IOException e) {
+            throw new FileStorageException("Failed to inspect uploaded file signature", e);
+        }
+
+        if (read <= 0) {
+            throw new FileStorageException("Uploaded file appears to be empty or unreadable");
+        }
+
+        byte[] prefix = Arrays.copyOf(header, read);
+        boolean valid;
+
+        switch (contentType) {
+            case "application/pdf" -> valid = isPdf(prefix);
+            case "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> valid = isZip(prefix);
+            case "text/plain" -> valid = isLikelyText(prefix);
+            default -> valid = false;
+        }
+
+        if (!valid) {
+            throw new FileStorageException("File content does not match declared type");
+        }
+    }
+
+    private boolean isPdf(byte[] prefix) {
+        return prefix.length >= 5
+                && prefix[0] == '%'
+                && prefix[1] == 'P'
+                && prefix[2] == 'D'
+                && prefix[3] == 'F'
+                && prefix[4] == '-';
+    }
+
+    private boolean isZip(byte[] prefix) {
+        if (prefix.length < 4) {
+            return false;
+        }
+        return prefix[0] == 'P'
+                && prefix[1] == 'K'
+                && (prefix[2] == 3 || prefix[2] == 5 || prefix[2] == 7)
+                && (prefix[3] == 4 || prefix[3] == 6 || prefix[3] == 8);
+    }
+
+    private boolean isLikelyText(byte[] prefix) {
+        for (byte b : prefix) {
+            int value = b & 0xFF;
+            if (value == 9 || value == 10 || value == 13) {
+                continue;
+            }
+            if (value < 32 || value == 127) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String sanitizeFilename(String filename) {

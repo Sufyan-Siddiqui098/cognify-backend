@@ -5,11 +5,14 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
 public interface ChunkRepository extends JpaRepository<Chunk, UUID> {
     List<Chunk> findByDocumentIdOrderByChunkIndex(UUID documentId);
+    Optional<Chunk> findFirstByVectorIdAndDocumentId(String vectorId, UUID documentId);
+    Optional<Chunk> findFirstByVectorIdOrderByCreatedAtDesc(String vectorId);
     long countByDocumentId(UUID documentId);
     void deleteByDocumentId(UUID documentId);
 }

@@ -13,7 +13,15 @@ public class ApiResponse<T> {
     private boolean success;
     private T data;
     private String message;
-    private String error;
+    private ErrorDetail error;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ErrorDetail {
+        private String code;
+        private String message;
+    }
 
     public static <T> ApiResponse<T> success(T data) {
         return ApiResponse.<T>builder()
@@ -33,7 +41,14 @@ public class ApiResponse<T> {
     public static <T> ApiResponse<T> error(String error) {
         return ApiResponse.<T>builder()
                 .success(false)
-                .error(error)
+                .error(new ErrorDetail("GENERIC_ERROR", error))
+                .build();
+    }
+
+    public static <T> ApiResponse<T> error(String code, String message) {
+        return ApiResponse.<T>builder()
+                .success(false)
+                .error(new ErrorDetail(code, message))
                 .build();
     }
 }

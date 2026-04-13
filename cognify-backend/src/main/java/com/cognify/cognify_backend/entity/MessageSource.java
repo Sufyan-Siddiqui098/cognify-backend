@@ -27,8 +27,20 @@ public class MessageSource {
     @Column(name = "message_id", nullable = false)
     private UUID messageId;
 
-    @Column(name = "chunk_id", nullable = false)
+    @Column(name = "chunk_id")
     private UUID chunkId;
+
+    @Column(name = "document_id")
+    private UUID documentId;
+
+    @Column(name = "document_name")
+    private String documentName;
+
+    @Column(name = "page_number")
+    private Integer pageNumber;
+
+    @Column(name = "snippet", columnDefinition = "TEXT")
+    private String snippet;
 
     @Column(name = "relevance_score")
     private Float relevanceScore;

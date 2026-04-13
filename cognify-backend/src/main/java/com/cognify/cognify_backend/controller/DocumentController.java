@@ -2,6 +2,7 @@ package com.cognify.cognify_backend.controller;
 
 import com.cognify.cognify_backend.dto.ApiResponse;
 import com.cognify.cognify_backend.dto.DocumentDto;
+import com.cognify.cognify_backend.dto.PaginatedResponse;
 import com.cognify.cognify_backend.security.UserPrincipal;
 import com.cognify.cognify_backend.service.DocumentService;
 import lombok.RequiredArgsConstructor;
@@ -30,7 +31,7 @@ public class DocumentController {
     }
 
     @GetMapping
-    public ResponseEntity<ApiResponse<Page<DocumentDto>>> getUserDocuments(
+    public ResponseEntity<ApiResponse<PaginatedResponse<DocumentDto>>> getUserDocuments(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "12") int limit,
             @RequestParam(defaultValue = "createdAt") String sortBy,
@@ -38,7 +39,7 @@ public class DocumentController {
             @AuthenticationPrincipal UserPrincipal userPrincipal) {
 
         Page<DocumentDto> documents = documentService.getUserDocuments(userPrincipal, page, limit, sortBy, sortOrder);
-        return ResponseEntity.ok(ApiResponse.success(documents));
+        return ResponseEntity.ok(ApiResponse.success(PaginatedResponse.from(documents)));
     }
 
     @GetMapping("/{id}")

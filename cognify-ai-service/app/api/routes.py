@@ -1,9 +1,13 @@
 """
-FastAPI routes
+FastAPI routes for the Cognify AI service.
+Handles document processing, semantic search, RAG generation, and vector cleanup.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from uuid import UUID
 import logging
+from pydantic import BaseModel
+from typing import Optional
+from functools import lru_cache
 
 from app.models import (
     ProcessDocumentRequest, ProcessDocumentResponse, ChunkMetadata,
@@ -25,21 +29,51 @@ settings = get_settings()
 doc_processor = DocumentProcessor()
 chunking_service = ChunkingService(settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
 
-# Deferred initialization or dynamic loading
-# In a real app we'd use Dependency Injection `Depends()`, but for this script we load directly
-# We initialize these cautiously in routes to avoid blocking import, but main.py handles preload.
-embedding_service = EmbeddingService(settings.EMBEDDING_MODEL)
-vector_store = VectorStore(settings.QDRANT_HOST, settings.QDRANT_PORT, settings.QDRANT_COLLECTION, settings.VECTOR_DIMENSION)
-llm_service = LLMService(settings.OLLAMA_URL, settings.OLLAMA_MODEL)
-rag_service = RAGService(embedding_service, vector_store, llm_service)
+@lru_cache(maxsize=1)
+def get_runtime_services():
+    """Create long-lived service singletons once per process."""
+    embedding_service = EmbeddingService(settings.EMBEDDING_MODEL)
+    vector_dimension = embedding_service.dimensions or settings.VECTOR_DIMENSION
+    vector_store = VectorStore(
+        settings.QDRANT_HOST,
+        settings.QDRANT_PORT,
+        settings.QDRANT_COLLECTION,
+        vector_dimension,
+    )
+    llm_service = LLMService(settings.OLLAMA_URL, settings.OLLAMA_MODEL)
+    rag_service = RAGService(embedding_service, vector_store, llm_service)
+    return embedding_service, vector_store, rag_service
+
+
+def initialize_runtime_services():
+    """Warm service singletons during app startup."""
+    return get_runtime_services()
+
+class DeleteVectorsRequest(BaseModel):
+    """Request model for deleting vectors associated with a document."""
+    document_id: str
+    user_id: str
 
 @router.post("/process-document", response_model=ProcessDocumentResponse)
-async def process_document(request: ProcessDocumentRequest):
+@router.post("/process", response_model=ProcessDocumentResponse)
+async def process_document(request: ProcessDocumentRequest = Body(...)):
     try:
+        embedding_service, vector_store, _ = get_runtime_services()
         logger.info(f"Processing document: {request.document_id}")
         
         full_text, page_map = doc_processor.process_document(request.file_path, request.document_type)
+        if not full_text or not full_text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "EMPTY_DOCUMENT", "message": "Document contains no extractable text."}
+            )
+
         chunks = chunking_service.chunk_text(full_text, page_map)
+        if not chunks:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "EMPTY_DOCUMENT", "message": "Document contains no extractable text."}
+            )
         
         chunk_texts = [chunk[0] for chunk in chunks]
         embeddings = await embedding_service.generate_embeddings_batch(chunk_texts)
@@ -48,6 +82,10 @@ async def process_document(request: ProcessDocumentRequest):
         qdrant_metadata = []
         
         import uuid
+        # Extract document name from file path
+        import os
+        document_name = os.path.basename(request.file_path)
+        
         for idx, (chunk_data, embedding) in enumerate(zip(chunks, embeddings)):
             chunk_text, start_char, end_char = chunk_data
             chunk_uuid = str(uuid.uuid4())
@@ -65,6 +103,7 @@ async def process_document(request: ProcessDocumentRequest):
                 'chunk_id': chunk_uuid,
                 'document_id': str(request.document_id),
                 'user_id': str(request.user_id),
+                'document_name': document_name,
                 'content': chunk_text,
                 'page_number': page_num,
                 'chunk_index': idx
@@ -80,6 +119,8 @@ async def process_document(request: ProcessDocumentRequest):
             total_chunks=len(chunk_metadata_list),
             message="Document processed successfully via Local Service"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -87,6 +128,7 @@ async def process_document(request: ProcessDocumentRequest):
 @router.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest):
     try:
+        _, _, rag_service = get_runtime_services()
         logger.info(f"Search request: {request.query}")
         results = await rag_service.search(request.query, str(request.user_id), request.top_k)
         
@@ -95,7 +137,7 @@ async def search(request: SearchRequest):
             search_results.append(SearchResult(
                 chunk_id=result['chunk_id'],
                 document_id=result['metadata']['document_id'],
-                document_name="document", # Could pass real name if we stored it
+                document_name=result['metadata'].get('document_name', 'document'),
                 content=result['metadata']['content'],
                 page_number=result['metadata'].get('page_number'),
                 relevance_score=result['score']
@@ -106,13 +148,25 @@ async def search(request: SearchRequest):
             query=request.query,
             total_results=len(search_results)
         )
+    except ValueError as e:
+        if str(e) == "NO_DOCUMENTS":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "NO_DOCUMENTS",
+                    "message": "No indexed documents found for this user."
+                }
+            )
+        raise
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/rag/generate", response_model=RAGGenerateResponse)
+@router.post("/generate", response_model=RAGGenerateResponse)
 async def generate_rag_response(request: RAGGenerateRequest):
     try:
+        _, _, rag_service = get_runtime_services()
         logger.info("RAG generate request")
         result = await rag_service.generate(
             request.user_message,
@@ -124,4 +178,22 @@ async def generate_rag_response(request: RAGGenerateRequest):
         return RAGGenerateResponse(**result)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/delete-vectors")
+async def delete_vectors(request: DeleteVectorsRequest = Body(...)):
+    """Delete all vectors belonging to a specific document from Qdrant."""
+    try:
+        _, vector_store, _ = get_runtime_services()
+        logger.info(f"Deleting vectors for document: {request.document_id}")
+        deleted_count = await vector_store.delete_vectors_by_document(
+            request.document_id, request.user_id
+        )
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Deleted vectors for document {request.document_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error deleting vectors: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

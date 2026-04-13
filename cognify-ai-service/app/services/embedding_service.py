@@ -10,13 +10,17 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 class EmbeddingService:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "sentence-transformers/all-mpnet-base-v2"):
         """
         Load local sentence-transformers model
         """
         logger.info(f"Loading embedding model: {model_name}")
         self.model = SentenceTransformer(model_name)
-        self.dimensions = self.model.get_sentence_embedding_dimension()
+        # sentence-transformers renamed this API; support both to stay compatible.
+        if hasattr(self.model, "get_embedding_dimension"):
+            self.dimensions = self.model.get_embedding_dimension()
+        else:
+            self.dimensions = self.model.get_sentence_embedding_dimension()
         logger.info(f"Model loaded! Dimensions: {self.dimensions}")
     
     async def generate_embedding(self, text: str) -> List[float]:

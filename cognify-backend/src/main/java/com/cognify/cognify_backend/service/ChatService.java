@@ -10,6 +10,11 @@ import com.cognify.cognify_backend.repository.MessageRepository;
 import com.cognify.cognify_backend.repository.MessageSourceRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,6 +48,23 @@ public class ChatService {
                 .collect(Collectors.toList());
     }
 
+        @Transactional(readOnly = true)
+        public Page<MessageDto> getConversationMessages(UUID conversationId, UUID userId, int page, int size) {
+        log.info("Fetching paginated messages for conversation: {} page={} size={}", conversationId, page, size);
+
+        conversationRepository.findByIdAndUserId(conversationId, userId)
+            .orElseThrow(() -> new ResourceNotFoundException("Conversation not found"));
+
+        Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").ascending());
+        Page<Message> messagePage = messageRepository.findByConversationId(conversationId, pageable);
+
+        List<MessageDto> messageDtos = messagePage.getContent().stream()
+            .map(this::mapToDto)
+            .toList();
+
+        return new PageImpl<>(messageDtos, pageable, messagePage.getTotalElements());
+        }
+
     @Transactional
     public MessageDto sendMessage(UUID conversationId, UUID userId, String content) {
         log.info("Processing message for conversation: {}", conversationId);
@@ -60,24 +82,9 @@ public class ChatService {
         userMessage = messageRepository.save(userMessage);
         log.info("Saved user message: {}", userMessage.getId());
 
-        // Generate RAG response
-        try {
-            MessageDto assistantMessage = ragService.generateResponse(conversationId, userId, content);
-            log.info("Generated assistant response");
-            return assistantMessage;
-        } catch (Exception e) {
-            log.error("Error generating RAG response", e);
-
-            // Save fallback message
-            Message fallbackMessage = Message.builder()
-                    .conversationId(conversationId)
-                    .sender(Message.MessageSender.ASSISTANT)
-                    .content("I apologize, but I'm having trouble processing your request right now. Please try again later.")
-                    .build();
-            fallbackMessage = messageRepository.save(fallbackMessage);
-
-            return mapToDto(fallbackMessage);
-        }
+        MessageDto assistantMessage = ragService.generateResponse(conversationId, userId, content);
+        log.info("Generated assistant response");
+        return assistantMessage;
     }
 
     /**

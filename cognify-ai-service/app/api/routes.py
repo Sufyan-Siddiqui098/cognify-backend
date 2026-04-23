@@ -32,7 +32,11 @@ chunking_service = ChunkingService(settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
 @lru_cache(maxsize=1)
 def get_runtime_services():
     """Create long-lived service singletons once per process."""
-    embedding_service = EmbeddingService(settings.EMBEDDING_MODEL)
+    embedding_service = EmbeddingService(
+        settings.EMBEDDING_MODEL,
+        local_files_only=settings.EMBEDDING_LOCAL_FILES_ONLY,
+        cache_folder=settings.EMBEDDING_CACHE_DIR,
+    )
     vector_dimension = embedding_service.dimensions or settings.VECTOR_DIMENSION
     vector_store = VectorStore(
         settings.QDRANT_HOST,

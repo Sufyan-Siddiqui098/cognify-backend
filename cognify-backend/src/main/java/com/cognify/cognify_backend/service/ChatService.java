@@ -4,6 +4,7 @@ import com.cognify.cognify_backend.dto.MessageDto;
 import com.cognify.cognify_backend.dto.SourceChunkDto;
 import com.cognify.cognify_backend.entity.Message;
 import com.cognify.cognify_backend.entity.MessageSource;
+import com.cognify.cognify_backend.exception.ConflictException;
 import com.cognify.cognify_backend.exception.ResourceNotFoundException;
 import com.cognify.cognify_backend.repository.ConversationRepository;
 import com.cognify.cognify_backend.repository.MessageRepository;
@@ -20,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -66,25 +68,72 @@ public class ChatService {
         }
 
     @Transactional
-    public MessageDto sendMessage(UUID conversationId, UUID userId, String content) {
+    public MessageDto sendMessage(UUID conversationId, UUID userId, String content, String idempotencyKey) {
         log.info("Processing message for conversation: {}", conversationId);
 
         // Verify conversation belongs to user (access control)
         conversationRepository.findByIdAndUserId(conversationId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Conversation not found"));
 
+        String normalizedRequestKey = normalizeIdempotencyKey(idempotencyKey);
+        if (normalizedRequestKey != null) {
+            Optional<Message> existingUserMessage = messageRepository
+                    .findByConversationIdAndSenderAndClientRequestId(
+                            conversationId,
+                            Message.MessageSender.USER,
+                            normalizedRequestKey
+                    );
+
+            if (existingUserMessage.isPresent()) {
+                Optional<Message> existingAssistantMessage = messageRepository
+                        .findByConversationIdAndSenderAndReplyToMessageId(
+                                conversationId,
+                                Message.MessageSender.ASSISTANT,
+                                existingUserMessage.get().getId()
+                        );
+
+                if (existingAssistantMessage.isPresent()) {
+                    log.info("Returning idempotent response for request key {}", normalizedRequestKey);
+                    return mapToDto(existingAssistantMessage.get());
+                }
+
+                throw new ConflictException(
+                        "A response for this request is still being generated. Please wait and retry."
+                );
+            }
+        }
+
+        Boolean lockAcquired = messageRepository.tryAcquireConversationLock(conversationLockKey(conversationId));
+        if (!Boolean.TRUE.equals(lockAcquired)) {
+            throw new ConflictException("Another message is currently being processed in this conversation.");
+        }
+
         // Save user message
         Message userMessage = Message.builder()
                 .conversationId(conversationId)
                 .sender(Message.MessageSender.USER)
                 .content(content)
+                .clientRequestId(normalizedRequestKey)
                 .build();
         userMessage = messageRepository.save(userMessage);
         log.info("Saved user message: {}", userMessage.getId());
 
-        MessageDto assistantMessage = ragService.generateResponse(conversationId, userId, content);
+        MessageDto assistantMessage = ragService.generateResponse(conversationId, userId, content, userMessage.getId());
         log.info("Generated assistant response");
         return assistantMessage;
+    }
+
+    private String normalizeIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null) {
+            return null;
+        }
+
+        String trimmed = idempotencyKey.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private long conversationLockKey(UUID conversationId) {
+        return conversationId.getMostSignificantBits() ^ conversationId.getLeastSignificantBits();
     }
 
     /**

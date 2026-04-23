@@ -53,6 +53,7 @@ public class RagService {
     private final MessageSourceRepository messageSourceRepository;
     private final ChunkRepository chunkRepository;
     private final DocumentRepository documentRepository;
+    private final DocumentProcessingService documentProcessingService;
     private final RestTemplate restTemplate;
     private final AiServiceConfig aiServiceConfig;
 
@@ -67,7 +68,7 @@ public class RagService {
      * @throws BadRequestException if user has no uploaded documents
      */
     @Transactional
-    public MessageDto generateResponse(UUID conversationId, UUID userId, String userMessage) {
+    public MessageDto generateResponse(UUID conversationId, UUID userId, String userMessage, UUID replyToMessageId) {
         log.info("Generating RAG response for conversation: {}", conversationId);
 
         // Step 0: Check if user has any documents uploaded
@@ -104,6 +105,7 @@ public class RagService {
                     .conversationId(conversationId)
                     .sender(Message.MessageSender.ASSISTANT)
                     .content(assistantResponse)
+                    .replyToMessageId(replyToMessageId)
                     .build();
             assistantMessage = messageRepository.save(assistantMessage);
 
@@ -172,6 +174,7 @@ public class RagService {
             List<Chunk> chunks = new ArrayList<>();
             List<Float> scores = new ArrayList<>();
             Set<String> seen = new HashSet<>();
+            Set<UUID> staleDeletedDocumentIds = new HashSet<>();
 
             for (Object resultObj : results) {
                 if (!(resultObj instanceof Map<?, ?> res)) {
@@ -207,9 +210,16 @@ public class RagService {
                         .ifPresentOrElse(chunk -> {
                             chunks.add(chunk);
                             scores.add(score);
-                        }, () -> log.debug("No chunk row found for AI chunk_id={} and document_id={}",
-                                chunkIdStr, documentIdStr));
+                        }, () -> {
+                            log.debug("No chunk row found for AI chunk_id={} and document_id={}",
+                                    chunkIdStr, documentIdStr);
+                            if (isDocumentMissingOrDeleted(documentId)) {
+                                staleDeletedDocumentIds.add(documentId);
+                            }
+                        });
             }
+
+            cleanStaleVectors(userId, staleDeletedDocumentIds);
 
             if (results.size() > 0 && chunks.isEmpty()) {
                 log.warn("AI returned {} results but none could be mapped to local chunks", results.size());
@@ -246,6 +256,28 @@ public class RagService {
             }
         }
         return 0.0f;
+    }
+
+    private boolean isDocumentMissingOrDeleted(UUID documentId) {
+        return documentRepository.findById(documentId)
+                .map(document -> document.getStatus() == Document.DocumentStatus.DELETED)
+                .orElse(true);
+    }
+
+    private void cleanStaleVectors(UUID userId, Set<UUID> staleDeletedDocumentIds) {
+        if (staleDeletedDocumentIds.isEmpty()) {
+            return;
+        }
+
+        // Keep cleanup bounded per request to avoid cascading latency on large stale sets.
+        staleDeletedDocumentIds.stream().limit(3).forEach(documentId -> {
+            try {
+                log.info("Cleaning stale vectors for deleted/missing document {}", documentId);
+                documentProcessingService.deleteVectorsForDocument(documentId, userId);
+            } catch (Exception e) {
+                log.warn("Failed stale-vector cleanup for document {}", documentId, e);
+            }
+        });
     }
 
     /**

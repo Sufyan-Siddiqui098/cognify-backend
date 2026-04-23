@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Embeddings (Local Model)
     EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     VECTOR_DIMENSION: int = 768
+    EMBEDDING_LOCAL_FILES_ONLY: bool = False
+    EMBEDDING_CACHE_DIR: str | None = None
     
     # Processing
     CHUNK_SIZE: int = 500

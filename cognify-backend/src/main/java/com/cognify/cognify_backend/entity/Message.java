@@ -32,6 +32,12 @@ public class Message {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String content;
 
+    @Column(name = "client_request_id", length = 100)
+    private String clientRequestId;
+
+    @Column(name = "reply_to_message_id")
+    private UUID replyToMessageId;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

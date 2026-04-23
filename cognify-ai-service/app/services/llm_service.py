@@ -2,6 +2,7 @@
 LOCAL LLM using Ollama
 """
 import logging
+import re
 from typing import List, Dict
 import requests
 
@@ -71,18 +72,56 @@ class LLMService:
             raise
     
     def _build_system_prompt(self) -> str:
-        return """You are a helpful AI assistant that answers questions strictly based on the user's uploaded documents.
+        return """You are a helpful AI assistant for document-grounded semantic search.
 
 Guidelines:
 1. Base your answers ON THE PROVIDED CONTEXT from the user's documents.
 2. If the context doesn't contain relevant information to answer the question, say so politely. Do not invent facts.
-3. Cite sources implicitly by mentioning you found it in their documents.
-4. Be concise but comprehensive.
+3. Prefer factual, directly grounded responses over generic explanations.
+4. Adapt style to user intent (exam prep, summary, comparison, definition, step-by-step, quick answer).
+5. Default style for normal semantic search: concise, structured, and practical.
 
 Remember: You are helping the user understand THEIR documents, not providing general knowledge."""
+
+    def _detect_intent(self, user_message: str) -> str:
+        text = user_message.lower()
+
+        if re.search(r"\b(exam|test|viva|marks|write in exam|exam answer)\b", text):
+            return "exam"
+        if re.search(r"\b(summarize|summary|in short|briefly|tl;dr)\b", text):
+            return "summary"
+        if re.search(r"\b(compare|difference|vs\b|versus|contrast)\b", text):
+            return "compare"
+        if re.search(r"\b(step|how to|process|procedure|workflow)\b", text):
+            return "steps"
+        if re.search(r"\b(define|definition|what is|meaning)\b", text):
+            return "definition"
+        return "semantic-search"
+
+    def _intent_style_prompt(self, intent: str) -> str:
+        styles = {
+            "exam": (
+                "Style: exam-ready. First give a one-line direct answer, then 3-5 key bullet points, "
+                "then one short example if available in context."
+            ),
+            "summary": "Style: concise summary with 3-6 bullets and no extra filler.",
+            "compare": "Style: comparison table-like bullets (A vs B) using only context evidence.",
+            "steps": "Style: numbered steps, clear sequence, practical wording.",
+            "definition": "Style: definition first, then core components and one context-based example.",
+            "semantic-search": (
+                "Style: concise and directly useful for retrieval tasks; answer first, then supporting "
+                "points grounded in context."
+            ),
+        }
+        return styles.get(intent, styles["semantic-search"])
     
     def _build_prompt(self, system_prompt: str, context: str, chat_history: List[Dict], user_message: str) -> str:
+        intent = self._detect_intent(user_message)
+        style_prompt = self._intent_style_prompt(intent)
+
         prompt = f"{system_prompt}\\n\\n"
+        prompt += f"{style_prompt}\n"
+        prompt += "If a specific detail is missing from context, say it is not present in uploaded documents.\n\n"
         
         for msg in chat_history[-5:]:
             role = "User" if msg.get('role', 'user').lower() == 'user' else "Assistant"

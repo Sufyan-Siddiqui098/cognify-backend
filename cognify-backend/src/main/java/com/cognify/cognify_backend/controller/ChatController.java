@@ -182,6 +182,7 @@ public class ChatController {
     public ResponseEntity<ApiResponse<MessageDto>> sendMessage(
             @PathVariable UUID id,
             @Valid @RequestBody SendMessageRequest request,
+            @RequestHeader(value = "X-Idempotency-Key", required = false) String idempotencyKey,
             @AuthenticationPrincipal UserPrincipal userPrincipal) {
 
         log.info("Sending message to conversation: {}", id);
@@ -189,7 +190,8 @@ public class ChatController {
         MessageDto response = chatService.sendMessage(
                 id,
                 userPrincipal.getId(),
-                request.getContent()
+                request.getContent(),
+                idempotencyKey
         );
 
         return ResponseEntity.ok(ApiResponse.success(

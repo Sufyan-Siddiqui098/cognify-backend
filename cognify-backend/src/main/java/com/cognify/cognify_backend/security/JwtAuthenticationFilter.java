@@ -66,10 +66,21 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     private boolean isPublicEndpoint(String path) {
-        return path.startsWith("/api/auth/") ||
+        return isPublicAuthEndpoint(path) ||
                path.equals("/api/health") ||
                path.startsWith("/actuator/") ||
                path.equals("/error");
+    }
+
+    private boolean isPublicAuthEndpoint(String path) {
+        return matchesPath(path, "/api/auth/login") ||
+               matchesPath(path, "/api/auth/signup") ||
+               matchesPath(path, "/api/auth/register") ||
+               matchesPath(path, "/api/auth/refresh");
+    }
+
+    private boolean matchesPath(String actualPath, String expectedPath) {
+        return expectedPath.equals(actualPath) || (expectedPath + "/").equals(actualPath);
     }
 
     private String getJwtFromRequest(HttpServletRequest request) {

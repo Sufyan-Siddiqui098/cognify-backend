@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     
     # Qdrant (Local Vector DB)
     QDRANT_HOST: str = "localhost"
-    QDRANT_PORT: int = 6333
+    QDRANT_PORT: int = 6334
     QDRANT_COLLECTION: str = "cognify_vectors"
     
     # Ollama (Local LLM)
@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # Processing
     CHUNK_SIZE: int = 500
     CHUNK_OVERLAP: int = 50
+    # Retrieval gating (tunable via .env)
+    MIN_RETRIEVAL_SCORE: float = 0.60
+    REQUIRE_EVIDENCE_KEYWORDS: bool = True
+    MIN_RETRIEVAL_SCORE_FALLBACK: float = 0.45
+    # When retrieving more candidates before filtering, multiply requested top_k
+    SEARCH_POOL_MULTIPLIER: int = 3
     
     # Storage
     STORAGE_BASE_PATH: str = "C:/cognify-uploads"
@@ -34,8 +40,11 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     
-    class Config:
-        env_file = ".env"
+    # pydantic v2 style settings
+    model_config = {
+        "env_file": ".env",
+        "extra": "ignore",
+    }
 
 @lru_cache()
 def get_settings() -> Settings:

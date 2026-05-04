@@ -6,6 +6,8 @@ from typing import List, Dict
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import VectorStore
 from app.services.llm_service import LLMService, LLMUnavailableError
+from app.config import get_settings
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +19,42 @@ class RAGService:
     
     async def search(self, query: str, user_id: str, top_k: int = 5) -> List[Dict]:
         logger.info(f"RAG search for user: {user_id}")
+        settings = get_settings()
+
         query_embedding = await self.embedding_service.generate_embedding(query)
-        results = await self.vector_store.search(query_embedding, user_id, top_k)
-        return results
+
+        # Request a larger candidate pool so filtering can still return top_k results
+        pool_k = max(top_k * getattr(settings, "SEARCH_POOL_MULTIPLIER", 3), top_k)
+        results = await self.vector_store.search(query_embedding, user_id, int(pool_k))
+
+        # Filter by strict retrieval threshold first
+        threshold = getattr(settings, "MIN_RETRIEVAL_SCORE", 0.6)
+        filtered = [r for r in results if (r.get('score') or 0) >= threshold]
+
+        # Optionally enforce that query keywords appear in the evidence chunks
+        if getattr(settings, "REQUIRE_EVIDENCE_KEYWORDS", False) and filtered:
+            # Basic keyword extraction (drop short/common words)
+            stopwords = {
+                'the','and','for','with','that','this','from','what','when','where','which','have','into','there',
+                'which','would','could','should','about','your','their','they','them','were','been','has','but'
+            }
+            words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 3 and w not in stopwords]
+            if words:
+                def has_keyword(res):
+                    content = (res.get('metadata', {}).get('content') or '').lower()
+                    return any(w in content for w in words)
+
+                filtered = [r for r in filtered if has_keyword(r)]
+
+        # If filtering removed everything, relax to fallback threshold
+        if not filtered:
+            fallback = getattr(settings, "MIN_RETRIEVAL_SCORE_FALLBACK", None)
+            if fallback is not None:
+                filtered = [r for r in results if (r.get('score') or 0) >= fallback]
+
+        # Sort and return only the requested number of results
+        filtered.sort(key=lambda x: x.get('score', 0), reverse=True)
+        return filtered[:top_k]
     
     async def generate(
         self,
@@ -38,9 +73,9 @@ class RAGService:
         except LLMUnavailableError as e:
             logger.warning("LLM unavailable (%s). Returning context-based fallback response.", e)
             return {
-                "response": (
-                    "I found relevant information in your documents, but the AI summary service is "
-                    "temporarily unavailable.\n\n" + context
+                "response": self.llm_service.compose_structured_response(
+                    self.llm_service._extract_source_chunks(context),
+                    "Your documents don't contain a direct answer to this query. However, the closest information found suggests: the AI summary service is temporarily unavailable, so only the retrieved document context is shown. You may want to search again later."
                 ),
                 "model": "fallback-context",
                 "usage": {

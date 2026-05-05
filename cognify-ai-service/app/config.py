@@ -16,7 +16,13 @@ class Settings(BaseSettings):
     
     # Ollama (Local LLM)
     OLLAMA_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.2"  # Pulled automatically via docker-compose
+    OLLAMA_MODEL: str = "llama3.2:latest"  # Pulled automatically via docker-compose
+    # Timeout settings: first request loads model into memory (can take 30-60s)
+    # Subsequent requests can still take 60-120s depending on query complexity and system load
+    LLM_TIMEOUT_FIRST_REQUEST: int = 300  # 5 minutes for first load
+    LLM_TIMEOUT_SUBSEQUENT: int = 180  # 3 minutes for normal requests (was too aggressive at 60s)
+    LLM_REQUEST_RETRIES: int = 2  # Number of retries on timeout
+    LLM_RETRY_DELAY: float = 2.0  # Initial delay in seconds (exponential backoff)
     
     # Embeddings (Local Model)
     EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
@@ -25,8 +31,9 @@ class Settings(BaseSettings):
     EMBEDDING_CACHE_DIR: str | None = None
     
     # Processing
-    CHUNK_SIZE: int = 500
-    CHUNK_OVERLAP: int = 50
+    CHUNK_SIZE: int = 750
+    CHUNK_OVERLAP: int = 120
+    MIN_CHUNK_CHAR_LENGTH: int = 50
     # Retrieval gating (tunable via .env)
     MIN_RETRIEVAL_SCORE: float = 0.60
     REQUIRE_EVIDENCE_KEYWORDS: bool = True

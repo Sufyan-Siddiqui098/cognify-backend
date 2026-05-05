@@ -35,5 +35,8 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
 
     long countByConversationId(UUID conversationId);
 
+    @Query("select m from Message m join Conversation c on m.conversationId = c.id where c.userId = :userId and m.sender = :sender")
+    List<Message> findByUserIdAndSender(@Param("userId") UUID userId, @Param("sender") Message.MessageSender sender);
+
     void deleteByConversationId(UUID conversationId);
 }

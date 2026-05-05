@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -47,7 +48,7 @@ import java.util.HashMap;
 @Slf4j
 public class RagService {
 
-    private static final int DEFAULT_TOP_K = 5;
+    private static final int DEFAULT_TOP_K = 15;
 
     private final MessageRepository messageRepository;
     private final MessageSourceRepository messageSourceRepository;
@@ -89,6 +90,20 @@ public class RagService {
 
             // Step 2: Build context from chunks
             String context = buildContext(relevantChunks);
+            log.debug("LLM context (full):\n{}", context);
+            for (int i = 0; i < relevantChunks.size(); i++) {
+                Chunk chunk = relevantChunks.get(i);
+                float score = i < relevanceScores.size() ? relevanceScores.get(i) : 0.0f;
+                log.debug(
+                        "LLM context chunk {}: docId={}, page={}, index={}, score={}, chars={}",
+                        i + 1,
+                        chunk.getDocumentId(),
+                        chunk.getPageNumber(),
+                        chunk.getChunkIndex(),
+                        score,
+                        chunk.getContent() != null ? chunk.getContent().length() : 0
+                );
+            }
 
             // Step 3: Get recent chat history for conversational context
             List<Message> chatHistory = messageRepository
@@ -289,22 +304,118 @@ public class RagService {
         }
 
         StringBuilder context = new StringBuilder("Based on the following information from your documents:\n\n");
+        List<MergedChunk> mergedChunks = mergeAdjacentChunks(chunks);
 
-        for (int i = 0; i < chunks.size(); i++) {
-            Chunk chunk = chunks.get(i);
-            Document doc = documentRepository.findById(chunk.getDocumentId()).orElse(null);
-            String docName = doc != null ? doc.getName() : "Unknown Document";
-
-            context.append(String.format("[Source %d: %s", i + 1, docName));
-            if (chunk.getPageNumber() != null) {
-                context.append(String.format(", Page %d", chunk.getPageNumber()));
+        for (int i = 0; i < mergedChunks.size(); i++) {
+            MergedChunk merged = mergedChunks.get(i);
+            context.append(String.format("[Source %d: %s", i + 1, merged.documentName));
+            if (merged.pageNumber != null) {
+                context.append(String.format(", Page %d", merged.pageNumber));
             }
             context.append("]\n");
-            context.append(chunk.getContent());
+            context.append(merged.content);
             context.append("\n\n");
         }
 
         return context.toString();
+    }
+
+    private static class MergedChunk {
+        private final String documentName;
+        private final Integer pageNumber;
+        private final String content;
+
+        private MergedChunk(String documentName, Integer pageNumber, String content) {
+            this.documentName = documentName;
+            this.pageNumber = pageNumber;
+            this.content = content;
+        }
+    }
+
+    private List<MergedChunk> mergeAdjacentChunks(List<Chunk> chunks) {
+        List<MergedChunk> merged = new ArrayList<>();
+        if (chunks == null || chunks.isEmpty()) {
+            return merged;
+        }
+
+        Map<UUID, String> docNames = new HashMap<>();
+        for (Chunk chunk : chunks) {
+            docNames.computeIfAbsent(chunk.getDocumentId(), id ->
+                documentRepository.findById(id)
+                    .map(Document::getName)
+                    .orElse("Unknown Document")
+            );
+        }
+
+        Map<String, List<Chunk>> grouped = new LinkedHashMap<>();
+        for (Chunk chunk : chunks) {
+            String key = chunk.getDocumentId() + ":" + (chunk.getPageNumber() != null ? chunk.getPageNumber() : -1);
+            grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(chunk);
+        }
+
+        for (List<Chunk> group : grouped.values()) {
+            group.sort((a, b) -> Integer.compare(
+                a.getChunkIndex() != null ? a.getChunkIndex() : 0,
+                b.getChunkIndex() != null ? b.getChunkIndex() : 0
+            ));
+
+            String currentContent = null;
+            Integer currentPage = null;
+            String currentDocName = null;
+            Integer lastIndex = null;
+
+            for (Chunk chunk : group) {
+                String content = chunk.getContent() != null ? chunk.getContent().trim() : "";
+                if (content.isBlank()) {
+                    continue;
+                }
+
+                Integer index = chunk.getChunkIndex() != null ? chunk.getChunkIndex() : 0;
+                if (currentContent == null) {
+                    currentContent = content;
+                    currentPage = chunk.getPageNumber();
+                    currentDocName = docNames.getOrDefault(chunk.getDocumentId(), "Unknown Document");
+                    lastIndex = index;
+                    continue;
+                }
+
+                if (lastIndex != null && index == lastIndex + 1) {
+                    currentContent = mergeWithOverlap(currentContent, content);
+                    lastIndex = index;
+                } else {
+                    merged.add(new MergedChunk(currentDocName, currentPage, currentContent));
+                    currentContent = content;
+                    currentPage = chunk.getPageNumber();
+                    currentDocName = docNames.getOrDefault(chunk.getDocumentId(), "Unknown Document");
+                    lastIndex = index;
+                }
+            }
+
+            if (currentContent != null) {
+                merged.add(new MergedChunk(currentDocName, currentPage, currentContent));
+            }
+        }
+
+        return merged;
+    }
+
+    private String mergeWithOverlap(String base, String next) {
+        if (base == null || base.isEmpty()) {
+            return next;
+        }
+        if (next == null || next.isEmpty()) {
+            return base;
+        }
+
+        int maxOverlap = Math.min(200, Math.min(base.length(), next.length()));
+        for (int i = maxOverlap; i >= 20; i--) {
+            String suffix = base.substring(base.length() - i);
+            if (next.startsWith(suffix)) {
+                return base + next.substring(i);
+            }
+        }
+
+        return base + "\n" + next;
     }
 
     /**

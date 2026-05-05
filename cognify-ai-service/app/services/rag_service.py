@@ -31,6 +31,14 @@ class RAGService:
         threshold = getattr(settings, "MIN_RETRIEVAL_SCORE", 0.6)
         filtered = [r for r in results if (r.get('score') or 0) >= threshold]
 
+        # Remove very short/generic chunks that tend to dominate similarity
+        min_len = getattr(settings, "MIN_CHUNK_CHAR_LENGTH", 50)
+        if min_len:
+            filtered = [
+                r for r in filtered
+                if len((r.get("metadata", {}).get("content") or "").strip()) >= min_len
+            ]
+
         # Optionally enforce that query keywords appear in the evidence chunks
         if getattr(settings, "REQUIRE_EVIDENCE_KEYWORDS", False) and filtered:
             # Basic keyword extraction (drop short/common words)
@@ -51,6 +59,11 @@ class RAGService:
             fallback = getattr(settings, "MIN_RETRIEVAL_SCORE_FALLBACK", None)
             if fallback is not None:
                 filtered = [r for r in results if (r.get('score') or 0) >= fallback]
+                if min_len:
+                    filtered = [
+                        r for r in filtered
+                        if len((r.get("metadata", {}).get("content") or "").strip()) >= min_len
+                    ]
 
         # Sort and return only the requested number of results
         filtered.sort(key=lambda x: x.get('score', 0), reverse=True)
@@ -71,13 +84,28 @@ class RAGService:
             )
             return result
         except LLMUnavailableError as e:
-            logger.warning("LLM unavailable (%s). Returning context-based fallback response.", e)
+            # Distinguish between timeout (model loading) and unavailable service
+            if e.is_timeout:
+                logger.warning("LLM timeout (%s). Returning fallback response.", e.reason)
+                fallback_message = (
+                    "⏳ The AI model is currently loading or taking longer than expected. "
+                    "The retrieval system is working, but the AI answer generation timed out. "
+                    "Here's what we found in your documents:"
+                )
+            else:
+                logger.warning("LLM unavailable (%s). Returning fallback response.", e.reason)
+                fallback_message = (
+                    "❌ The local AI service is unavailable. "
+                    "Here's what we found in your documents (without AI reformulation):"
+                )
+            
             return {
                 "response": self.llm_service.compose_structured_response(
                     self.llm_service._extract_source_chunks(context),
-                    "Your documents don't contain a direct answer to this query. However, the closest information found suggests: the AI summary service is temporarily unavailable, so only the retrieved document context is shown. You may want to search again later."
+                    fallback_message
                 ),
                 "model": "fallback-context",
+                "error_reason": e.reason,
                 "usage": {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,

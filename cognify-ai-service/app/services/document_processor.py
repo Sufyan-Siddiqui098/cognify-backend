@@ -48,6 +48,7 @@ class DocumentProcessor:
         try:
             import pymupdf4llm
             md_text = pymupdf4llm.to_markdown(file_path)
+            md_text = self._clean_extracted_text(md_text)
 
             # Build simple page map (approximate: split by form feeds or page markers)
             page_map = {0: 1}
@@ -66,6 +67,76 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Error processing PDF: {e}")
             raise
+
+    def _clean_extracted_text(self, text: str) -> str:
+        """Normalize and clean extracted text before chunking/embedding."""
+        if not text:
+            return text
+
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        cleaned_lines = []
+        image_placeholder_pattern = re.compile(r"^==>.*?intentionally omitted.*?<==$", re.IGNORECASE)
+        page_number_pattern = re.compile(r"^\s*(page\s+)?\d+\s*$", re.IGNORECASE)
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                cleaned_lines.append("")
+                continue
+
+            if image_placeholder_pattern.match(stripped):
+                continue
+
+            if page_number_pattern.match(stripped):
+                continue
+
+            normalized = re.sub(r"~~(.*?)~~", r"\1", stripped)
+            normalized = re.sub(r"\*\*(.*?)\*\*", r"\1", normalized)
+            normalized = re.sub(r"__(.*?)__", r"\1", normalized)
+            cleaned_lines.append(normalized)
+
+        short_line_counts = {}
+        for line in cleaned_lines:
+            stripped = line.strip()
+            if 3 <= len(stripped) <= 60:
+                short_line_counts[stripped] = short_line_counts.get(stripped, 0) + 1
+
+        repeated_lines = {line for line, count in short_line_counts.items() if count >= 3}
+
+        filtered_lines = []
+        last_non_empty = None
+        for line in cleaned_lines:
+            stripped = line.strip()
+            if stripped and stripped in repeated_lines:
+                continue
+            if stripped and stripped == last_non_empty:
+                continue
+            filtered_lines.append(line)
+            if stripped:
+                last_non_empty = stripped
+
+        paragraphs = []
+        current = []
+        for line in filtered_lines:
+            stripped = line.strip()
+            if not stripped:
+                if current:
+                    paragraphs.append(" ".join(current).strip())
+                    current = []
+                continue
+
+            if current:
+                prev = current[-1]
+                if not re.search(r"[\.\!\?\:]$", prev) and stripped[:1].islower():
+                    current[-1] = prev + " " + stripped
+                    continue
+
+            current.append(stripped)
+
+        if current:
+            paragraphs.append(" ".join(current).strip())
+
+        return "\n\n".join(p for p in paragraphs if p)
 
     def _process_docx(self, file_path: str) -> tuple[str, dict]:
         """Extract text from Word documents using python-docx."""

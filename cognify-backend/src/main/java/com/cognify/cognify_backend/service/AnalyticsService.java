@@ -1,6 +1,7 @@
 package com.cognify.cognify_backend.service;
 
 import com.cognify.cognify_backend.entity.Document;
+import com.cognify.cognify_backend.entity.Message;
 import com.cognify.cognify_backend.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,13 +47,9 @@ public class AnalyticsService {
 
         long totalConversations = conversationRepository.countByUserId(userId);
 
-        // Count total messages sent by user (search queries)
-        long totalSearches = 0;
-        var conversations = conversationRepository.findByUserId(userId,
-                org.springframework.data.domain.Pageable.unpaged()).getContent();
-        for (var conv : conversations) {
-            totalSearches += messageRepository.countByConversationId(conv.getId());
-        }
+        // Count total queries sent by user (search queries)
+        List<Message> userMessages = messageRepository.findByUserIdAndSender(userId, Message.MessageSender.USER);
+        long totalSearches = userMessages.size();
 
         long storageUsed = userDocs.stream()
                 .mapToLong(d -> d.getSize() != null ? d.getSize() : 0)
@@ -62,11 +59,58 @@ public class AnalyticsService {
         summary.put("totalDocuments", userDocs.size());
         summary.put("totalChunks", totalChunks);
         summary.put("totalConversations", totalConversations);
-        summary.put("totalSearches", totalSearches / 2); // Divide by 2: each Q&A is 2 messages
+                summary.put("totalSearches", totalSearches);
         summary.put("storageUsed", storageUsed);
+
+                Map<String, Object> recallStats = new LinkedHashMap<>();
+                recallStats.put("totalQueries", totalSearches);
+                recallStats.put("topTopics", buildTopTopics(userMessages));
+                summary.put("recallStats", recallStats);
+                summary.put("topTopics", recallStats.get("topTopics"));
 
         return summary;
     }
+
+        private List<Map<String, Object>> buildTopTopics(List<Message> messages) {
+                if (messages == null || messages.isEmpty()) {
+                        return Collections.emptyList();
+                }
+
+                Set<String> stopwords = new HashSet<>(Arrays.asList(
+                        "the", "and", "for", "with", "that", "this", "from", "what", "when", "where",
+                        "which", "would", "could", "should", "about", "your", "their", "they", "them",
+                        "were", "been", "has", "have", "but", "into", "there", "here", "then", "than",
+                        "also", "only", "just", "will", "dont", "does", "doesnt", "did", "didnt", "cant",
+                        "cannot", "its", "you", "are", "was", "who", "why", "how", "can"
+                ));
+
+                Map<String, Long> counts = new HashMap<>();
+                for (Message message : messages) {
+                        String content = message.getContent();
+                        if (content == null || content.isBlank()) {
+                                continue;
+                        }
+
+                        String[] tokens = content.toLowerCase().split("[^a-z0-9]+");
+                        for (String token : tokens) {
+                                if (token.length() < 3 || stopwords.contains(token)) {
+                                        continue;
+                                }
+                                counts.put(token, counts.getOrDefault(token, 0L) + 1L);
+                        }
+                }
+
+                return counts.entrySet().stream()
+                                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                                .limit(5)
+                                .map(entry -> {
+                                        Map<String, Object> topic = new LinkedHashMap<>();
+                                        topic.put("topic", entry.getKey());
+                                        topic.put("queries", entry.getValue());
+                                        return topic;
+                                })
+                                .collect(Collectors.toList());
+        }
 
     /**
      * Get document type distribution for chart display (pie chart data).

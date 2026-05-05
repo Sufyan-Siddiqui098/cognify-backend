@@ -44,14 +44,33 @@ def get_runtime_services():
         settings.QDRANT_COLLECTION,
         vector_dimension,
     )
-    llm_service = LLMService(settings.OLLAMA_URL, settings.OLLAMA_MODEL)
+    # Initialize LLM service with configurable timeouts and retry logic
+    llm_service = LLMService(
+        ollama_url=settings.OLLAMA_URL,
+        model=settings.OLLAMA_MODEL,
+        timeout_first_request=settings.LLM_TIMEOUT_FIRST_REQUEST,
+        timeout_subsequent=settings.LLM_TIMEOUT_SUBSEQUENT,
+        request_retries=settings.LLM_REQUEST_RETRIES,
+        retry_delay=settings.LLM_RETRY_DELAY,
+    )
     rag_service = RAGService(embedding_service, vector_store, llm_service)
     return embedding_service, vector_store, rag_service
 
 
 def initialize_runtime_services():
-    """Warm service singletons during app startup."""
-    return get_runtime_services()
+    """Warm service singletons during app startup and verify Ollama is healthy."""
+    embedding_service, vector_store, rag_service = get_runtime_services()
+    
+    # Health check Ollama during startup
+    llm_service = rag_service.llm_service
+    if not llm_service.health_check():
+        logger.warning(
+            "⚠️  Ollama is not accessible at startup. The service will continue, "
+            "but requests will fail until Ollama becomes available. "
+            "Start Ollama with: ollama serve"
+        )
+    
+    return embedding_service, vector_store, rag_service
 
 class DeleteVectorsRequest(BaseModel):
     """Request model for deleting vectors associated with a document."""

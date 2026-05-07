@@ -7,7 +7,7 @@ from functools import lru_cache
 class Settings(BaseSettings):
     # Service
     SERVICE_PORT: int = 8000
-    CORS_ALLOWED_ORIGINS: str = "http://localhost:8082,http://localhost:8080"
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:8082,http://localhost:8080, http://localhost:3000,http://localhost:5173"
     
     # Qdrant (Local Vector DB)
     QDRANT_HOST: str = "localhost"
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     SEARCH_POOL_MULTIPLIER: int = 3
     
     # Storage
-    STORAGE_BASE_PATH: str = "C:/cognify-uploads"
+    STORAGE_BASE_PATH: str = "./uploads"
     
     # Logging
     LOG_LEVEL: str = "INFO"

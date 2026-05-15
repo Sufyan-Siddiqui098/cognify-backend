@@ -8,6 +8,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,6 +38,13 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
 
     @Query("select m from Message m join Conversation c on m.conversationId = c.id where c.userId = :userId and m.sender = :sender")
     List<Message> findByUserIdAndSender(@Param("userId") UUID userId, @Param("sender") Message.MessageSender sender);
+
+    @Query("select count(m) from Message m join Conversation c on m.conversationId = c.id where c.userId = :userId and m.sender = :sender")
+    long countByUserIdAndSender(@Param("userId") UUID userId, @Param("sender") Message.MessageSender sender);
+
+    long countBySender(Message.MessageSender sender);
+
+    List<Message> findBySenderAndCreatedAtAfter(Message.MessageSender sender, LocalDateTime createdAt);
 
     void deleteByConversationId(UUID conversationId);
 }

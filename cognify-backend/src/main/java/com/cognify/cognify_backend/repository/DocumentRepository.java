@@ -17,6 +17,7 @@ public interface DocumentRepository extends JpaRepository<Document, UUID>, JpaSp
     Optional<Document> findByIdAndUserIdAndStatusNot(UUID id, UUID userId, Document.DocumentStatus status);
     long countByUserIdAndStatusNot(UUID userId, Document.DocumentStatus status);
     long countByStatusNot(Document.DocumentStatus status);
+    long countByStatus(Document.DocumentStatus status);
     Page<Document> findByStatusNot(Document.DocumentStatus status, Pageable pageable);
     List<Document> findByStatusNot(Document.DocumentStatus status);
 }

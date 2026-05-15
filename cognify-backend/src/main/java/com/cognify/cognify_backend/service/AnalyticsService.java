@@ -2,6 +2,7 @@ package com.cognify.cognify_backend.service;
 
 import com.cognify.cognify_backend.entity.Document;
 import com.cognify.cognify_backend.entity.Message;
+import com.cognify.cognify_backend.entity.User;
 import com.cognify.cognify_backend.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +11,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.format.TextStyle;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -236,29 +239,222 @@ public class AnalyticsService {
     public Map<String, Object> getPlatformAnalytics() {
         log.info("Generating platform-wide analytics");
 
-        long totalUsers = userRepository.count() - 1;
+        List<User> allUsers = userRepository.findAll();
+        List<User> nonAdminUsers = allUsers.stream()
+                .filter(u -> u.getRole() != User.Role.ADMIN)
+                .toList();
+
+        List<Document> activeDocs = documentRepository.findByStatusNot(Document.DocumentStatus.DELETED);
+
+        long totalUsers = nonAdminUsers.size();
         long totalDocuments = documentRepository.countByStatusNot(Document.DocumentStatus.DELETED);
+        long indexedDocuments = documentRepository.countByStatus(Document.DocumentStatus.INDEXED);
         long totalConversations = conversationRepository.count();
 
         // Count active users (users who logged in within the last 24 hours)
-        long activeUsersToday = userRepository.findAll().stream()
+        long activeUsersToday = nonAdminUsers.stream()
                 .filter(u -> u.getLastLoginAt() != null &&
                         u.getLastLoginAt().isAfter(LocalDateTime.now().minusDays(1)))
                 .count();
 
-        // Calculate total storage
-        long totalStorage = documentRepository.findByStatusNot(Document.DocumentStatus.DELETED).stream()
+        long totalStorage = activeDocs.stream()
                 .mapToLong(d -> d.getSize() != null ? d.getSize() : 0)
                 .sum();
+
+        long totalChunks = activeDocs.stream()
+                .mapToLong(d -> d.getChunksCount() != null ? d.getChunksCount() : 0)
+                .sum();
+
+        long totalQueries = messageRepository.countBySender(Message.MessageSender.USER);
 
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("totalUsers", totalUsers);
         stats.put("totalDocuments", totalDocuments);
         stats.put("totalConversations", totalConversations);
+        stats.put("activeUsers", activeUsersToday);
         stats.put("activeUsersToday", activeUsersToday);
+        stats.put("indexedDocuments", indexedDocuments);
+        stats.put("totalChunks", totalChunks);
+        stats.put("totalQueries", totalQueries);
         stats.put("totalStorageUsed", totalStorage);
 
+        stats.put("recentUsers", buildRecentUsers(nonAdminUsers));
+        stats.put("jobs", buildIndexingJobs(activeDocs));
+        stats.put("indexingJobs", stats.get("jobs"));
+
+        stats.put("documentTypes", buildDocumentTypeDistribution(activeDocs));
+        stats.put("indexingStatus", buildIndexingStatus(activeDocs));
+        stats.put("userRegistrations", buildUserRegistrationsMonthly(nonAdminUsers));
+        stats.put("documentUploads", buildDocumentUploadsMonthly(activeDocs));
+        stats.put("queryActivity", buildQueryActivityDaily());
+        stats.put("topUsers", buildTopUsers(nonAdminUsers));
+
         return stats;
+    }
+
+    private List<Map<String, Object>> buildRecentUsers(List<User> users) {
+        return users.stream()
+                .sorted(Comparator.comparing(User::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .limit(5)
+                .map(user -> {
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("id", user.getId());
+                    entry.put("name", user.getName());
+                    entry.put("email", user.getEmail());
+                    entry.put("status", user.getStatus().name().toLowerCase());
+                    entry.put("createdAt", user.getCreatedAt());
+                    return entry;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> buildIndexingJobs(List<Document> documents) {
+        return documents.stream()
+                .sorted(Comparator.comparing(Document::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .limit(10)
+                .map(doc -> {
+                    Map<String, Object> job = new LinkedHashMap<>();
+                    job.put("id", doc.getId());
+                    job.put("documentName", doc.getName());
+                    job.put("status", mapJobStatus(doc.getStatus()));
+                    job.put("createdAt", doc.getCreatedAt());
+                    return job;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private String mapJobStatus(Document.DocumentStatus status) {
+        if (status == null) {
+            return "pending";
+        }
+        return switch (status) {
+            case INDEXED -> "completed";
+            case PROCESSING -> "processing";
+            case FAILED -> "failed";
+            default -> "pending";
+        };
+    }
+
+    private List<Map<String, Object>> buildDocumentTypeDistribution(List<Document> documents) {
+        Map<String, Long> typeCounts = documents.stream()
+                .collect(Collectors.groupingBy(
+                        d -> d.getType().name(),
+                        Collectors.counting()
+                ));
+
+        return typeCounts.entrySet().stream()
+                .map(entry -> {
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("name", entry.getKey());
+                    data.put("count", entry.getValue());
+                    return data;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> buildIndexingStatus(List<Document> documents) {
+        Map<String, Long> statusCounts = documents.stream()
+                .collect(Collectors.groupingBy(
+                        d -> d.getStatus().name().toLowerCase(),
+                        Collectors.counting()
+                ));
+
+        return statusCounts.entrySet().stream()
+                .map(entry -> {
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("status", entry.getKey());
+                    data.put("name", entry.getKey().substring(0, 1).toUpperCase() + entry.getKey().substring(1));
+                    data.put("count", entry.getValue());
+                    return data;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> buildUserRegistrationsMonthly(List<User> users) {
+        Map<YearMonth, Long> counts = users.stream()
+                .filter(u -> u.getCreatedAt() != null)
+                .collect(Collectors.groupingBy(
+                        u -> YearMonth.from(u.getCreatedAt()),
+                        Collectors.counting()
+                ));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (int i = 5; i >= 0; i--) {
+            YearMonth month = YearMonth.now().minusMonths(i);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("month", month.getMonth().getDisplayName(TextStyle.SHORT, Locale.ENGLISH));
+            entry.put("users", counts.getOrDefault(month, 0L));
+            result.add(entry);
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> buildDocumentUploadsMonthly(List<Document> documents) {
+        Map<YearMonth, Long> counts = documents.stream()
+                .filter(d -> d.getCreatedAt() != null)
+                .collect(Collectors.groupingBy(
+                        d -> YearMonth.from(d.getCreatedAt()),
+                        Collectors.counting()
+                ));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (int i = 5; i >= 0; i--) {
+            YearMonth month = YearMonth.now().minusMonths(i);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("month", month.getMonth().getDisplayName(TextStyle.SHORT, Locale.ENGLISH));
+            entry.put("uploads", counts.getOrDefault(month, 0L));
+            result.add(entry);
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> buildQueryActivityDaily() {
+        LocalDate startDate = LocalDate.now().minusDays(6);
+        Map<LocalDate, Long> counts = messageRepository
+                .findBySenderAndCreatedAtAfter(Message.MessageSender.USER, startDate.atStartOfDay())
+                .stream()
+                .filter(message -> message.getCreatedAt() != null)
+                .collect(Collectors.groupingBy(
+                        message -> message.getCreatedAt().toLocalDate(),
+                        Collectors.counting()
+                ));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (int i = 6; i >= 0; i--) {
+            LocalDate date = LocalDate.now().minusDays(i);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("day", date.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH));
+            entry.put("queries", counts.getOrDefault(date, 0L));
+            result.add(entry);
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> buildTopUsers(List<User> users) {
+        return users.stream()
+                .map(user -> {
+                    long documents = documentRepository.countByUserIdAndStatusNot(user.getId(), Document.DocumentStatus.DELETED);
+                    long queries = messageRepository.countByUserIdAndSender(user.getId(), Message.MessageSender.USER);
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("id", user.getId());
+                    entry.put("name", user.getName());
+                    entry.put("email", user.getEmail());
+                    entry.put("documents", documents);
+                    entry.put("queries", queries);
+                    return entry;
+                })
+                .sorted((a, b) -> {
+                    long qa = (long) a.get("queries");
+                    long qb = (long) b.get("queries");
+                    if (qa != qb) {
+                        return Long.compare(qb, qa);
+                    }
+                    long da = (long) a.get("documents");
+                    long db = (long) b.get("documents");
+                    return Long.compare(db, da);
+                })
+                .limit(5)
+                .collect(Collectors.toList());
     }
 
     /**

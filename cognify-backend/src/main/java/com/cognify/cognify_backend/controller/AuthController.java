@@ -10,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
+
 /**
  * Authentication Controller.
  * Handles user registration, login, logout, token refresh, and profile retrieval.
@@ -56,5 +58,16 @@ public class AuthController {
     public ResponseEntity<ApiResponse<UserDto>> getProfile(@AuthenticationPrincipal UserPrincipal userPrincipal) {
         UserDto profile = authService.getProfile(userPrincipal);
         return ResponseEntity.ok(ApiResponse.success(profile));
+    }
+
+    /**
+     * Update the authenticated user's profile (name only).
+     */
+    @PutMapping("/profile")
+    public ResponseEntity<ApiResponse<UserDto>> updateProfile(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @RequestBody Map<String, Object> updates) {
+        UserDto profile = authService.updateProfile(userPrincipal, updates);
+        return ResponseEntity.ok(ApiResponse.success(profile, "Profile updated"));
     }
 }

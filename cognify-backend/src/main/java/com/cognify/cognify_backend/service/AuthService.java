@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Authentication service handling user registration, login, logout, and token refresh.
@@ -132,6 +133,30 @@ public class AuthService {
                 .email(userPrincipal.getUsername())
                 .name(userPrincipal.getName())
                 .role(userPrincipal.getRole())
+                .build();
+    }
+
+    /**
+     * Update the authenticated user's profile (name only).
+     */
+    @Transactional
+    public UserDto updateProfile(UserPrincipal userPrincipal, Map<String, Object> updates) {
+        User user = userRepository.findById(userPrincipal.getId())
+                .orElseThrow(() -> new BadRequestException("User not found"));
+
+        if (updates != null) {
+            Object name = updates.get("name");
+            if (name instanceof String value && !value.trim().isEmpty()) {
+                user.setName(value.trim());
+            }
+        }
+
+        User saved = userRepository.save(user);
+        return UserDto.builder()
+                .id(saved.getId())
+                .email(saved.getEmail())
+                .name(saved.getName())
+                .role(saved.getRole().name().toLowerCase())
                 .build();
     }
 

@@ -236,7 +236,7 @@ public class AnalyticsService {
     public Map<String, Object> getPlatformAnalytics() {
         log.info("Generating platform-wide analytics");
 
-        long totalUsers = userRepository.count();
+        long totalUsers = userRepository.count() - 1;
         long totalDocuments = documentRepository.countByStatusNot(Document.DocumentStatus.DELETED);
         long totalConversations = conversationRepository.count();
 

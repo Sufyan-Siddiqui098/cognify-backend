@@ -50,6 +50,8 @@ public class AuthService {
             throw new ConflictException("Email already exists");
         }
 
+        validatePasswordStrength(request.getPassword());
+
         User user = User.builder()
                 .email(request.getEmail())
                 .passwordHash(passwordEncoder.encode(request.getPassword()))
@@ -161,6 +163,28 @@ public class AuthService {
     }
 
     /**
+     * Change the authenticated user's password using their current password.
+     */
+    @Transactional
+    public void changePassword(UserPrincipal userPrincipal, ChangePasswordRequest request) {
+        User user = userRepository.findById(userPrincipal.getId())
+                .orElseThrow(() -> new BadRequestException("User not found"));
+
+        if (!passwordEncoder.matches(request.getCurrentPassword(), user.getPasswordHash())) {
+            throw new BadRequestException("Current password is incorrect");
+        }
+
+        if (request.getCurrentPassword().equals(request.getNewPassword())) {
+            throw new BadRequestException("New password must be different from current password");
+        }
+
+        validatePasswordStrength(request.getNewPassword());
+
+        user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        userRepository.save(user);
+    }
+
+    /**
      * Create a new session (access + refresh tokens) for a user.
      */
     private AuthResponse createSession(User user) {
@@ -194,5 +218,18 @@ public class AuthService {
                 .refreshToken(refreshToken)
                 .expiresIn(900L) // 15 minutes in seconds
                 .build();
+    }
+
+    private void validatePasswordStrength(String password) {
+        if (password == null || password.isBlank()) {
+            throw new BadRequestException("Password is required");
+        }
+
+        boolean hasNumber = password.chars().anyMatch(Character::isDigit);
+        boolean hasSpecial = password.chars().anyMatch(ch -> !Character.isLetterOrDigit(ch));
+
+        if (!hasNumber || !hasSpecial) {
+            throw new BadRequestException("Password must include at least one number and one special character");
+        }
     }
 }

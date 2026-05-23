@@ -11,6 +11,8 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,18 +61,24 @@ public class DocumentProcessingService {
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
-                ProcessDocumentPayload requestBody = new ProcessDocumentPayload(
-                    document.getId().toString(),
-                    document.getStoragePath(),
-                    document.getUserId().toString(),
-                    document.getType().name()
-                );
-                HttpEntity<ProcessDocumentPayload> request = new HttpEntity<>(requestBody, headers);
+            Path resolvedPath = Paths.get(document.getStoragePath());
+            if (!resolvedPath.isAbsolute()) {
+                resolvedPath = Paths.get("").toAbsolutePath().resolve(resolvedPath).normalize();
+            }
+            String absolutePath = resolvedPath.toString();
+
+            ProcessDocumentPayload requestBody = new ProcessDocumentPayload(
+                document.getId().toString(),
+                absolutePath,
+                document.getUserId().toString(),
+                document.getType().name()
+            );
+            HttpEntity<ProcessDocumentPayload> request = new HttpEntity<>(requestBody, headers);
 
             String processUrl = aiServiceConfig.getUrl() + "/api/v1/process-document";
             log.info("Sending request to Python API: {}", processUrl);
-                log.debug("Process payload documentId={}, userId={}, type={}, filePath={} ",
-                    requestBody.document_id(), requestBody.user_id(), requestBody.document_type(), requestBody.file_path());
+            log.debug("Process payload documentId={}, userId={}, type={}, filePath={} ",
+                requestBody.document_id(), requestBody.user_id(), requestBody.document_type(), requestBody.file_path());
 
             ResponseEntity<Map> response = restTemplate.postForEntity(processUrl, request, Map.class);
 

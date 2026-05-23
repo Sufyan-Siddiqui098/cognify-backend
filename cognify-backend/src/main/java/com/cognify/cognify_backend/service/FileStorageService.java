@@ -24,14 +24,15 @@ import java.util.UUID;
 public class FileStorageService {
 
     private final StorageConfig storageConfig;
+    private Path resolvedBasePath;
 
     @PostConstruct
     public void init() {
         try {
-            Path basePath = Paths.get(storageConfig.getBasePath());
-            if (!Files.exists(basePath)) {
-                Files.createDirectories(basePath);
-                log.info("Created base storage directory: {}", basePath);
+            resolvedBasePath = Paths.get(storageConfig.getBasePath()).toAbsolutePath().normalize();
+            if (!Files.exists(resolvedBasePath)) {
+                Files.createDirectories(resolvedBasePath);
+                log.info("Created base storage directory: {}", resolvedBasePath);
             }
         } catch (IOException e) {
             throw new FileStorageException("Could not create storage directory", e);
@@ -44,7 +45,7 @@ public class FileStorageService {
 
         try {
             // Create user directory if not exists
-            Path userDirectory = Paths.get(storageConfig.getBasePath(), userId.toString());
+            Path userDirectory = resolvedBasePath.resolve(userId.toString());
             if (!Files.exists(userDirectory)) {
                 Files.createDirectories(userDirectory);
                 log.info("Created user directory: {}", userDirectory);
@@ -57,7 +58,7 @@ public class FileStorageService {
             String uniqueFilename = sanitizedFilename + "_" + System.currentTimeMillis() + "." + extension;
 
             // Store file
-            Path targetLocation = userDirectory.resolve(uniqueFilename);
+            Path targetLocation = userDirectory.resolve(uniqueFilename).toAbsolutePath().normalize();
             Files.copy(file.getInputStream(), targetLocation, StandardCopyOption.REPLACE_EXISTING);
 
             log.info("File stored successfully: {}", targetLocation);
@@ -71,7 +72,7 @@ public class FileStorageService {
 
     public void deleteFile(String filePath) {
         try {
-            Path path = Paths.get(filePath);
+            Path path = Paths.get(filePath).toAbsolutePath().normalize();
             Files.deleteIfExists(path);
             log.info("File deleted: {}", filePath);
         } catch (IOException e) {
@@ -82,7 +83,7 @@ public class FileStorageService {
 
     public byte[] readFile(String filePath) {
         try {
-            Path path = Paths.get(filePath);
+            Path path = Paths.get(filePath).toAbsolutePath().normalize();
             return Files.readAllBytes(path);
         } catch (IOException e) {
             log.error("Failed to read file: {}", filePath, e);

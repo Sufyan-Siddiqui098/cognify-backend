@@ -75,16 +75,23 @@ class DocumentProcessor:
 
         lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         cleaned_lines = []
-        image_placeholder_pattern = re.compile(r"^==>.*?intentionally omitted.*?<==$", re.IGNORECASE)
+        image_placeholder_pattern = re.compile(r"^==>.*?(intentionally omitted|picture|image).*?<==$", re.IGNORECASE)
+        picture_text_pattern = re.compile(r"end of picture text", re.IGNORECASE)
         page_number_pattern = re.compile(r"^\s*(page\s+)?\d+\s*$", re.IGNORECASE)
 
         for line in lines:
             stripped = line.strip()
+            stripped = re.sub(r"<br\s*/?>", " ", stripped, flags=re.IGNORECASE)
+            stripped = re.sub(r"<[^>]+>", "", stripped)
+            stripped = stripped.strip()
             if not stripped:
                 cleaned_lines.append("")
                 continue
 
             if image_placeholder_pattern.match(stripped):
+                continue
+
+            if picture_text_pattern.search(stripped):
                 continue
 
             if page_number_pattern.match(stripped):

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     
     # Qdrant (Local Vector DB)
     QDRANT_HOST: str = "localhost"
-    QDRANT_PORT: int = 6334
+    QDRANT_PORT: int = 6333
     QDRANT_COLLECTION: str = "cognify_vectors"
     
     # Ollama (Local LLM)
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     MIN_CHUNK_CHAR_LENGTH: int = 50
     # Retrieval gating (tunable via .env)
     MIN_RETRIEVAL_SCORE: float = 0.60
-    REQUIRE_EVIDENCE_KEYWORDS: bool = True
+    REQUIRE_EVIDENCE_KEYWORDS: bool = False
     MIN_RETRIEVAL_SCORE_FALLBACK: float = 0.45
     # When retrieving more candidates before filtering, multiply requested top_k
     SEARCH_POOL_MULTIPLIER: int = 3

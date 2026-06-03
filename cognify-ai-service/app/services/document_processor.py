@@ -6,6 +6,8 @@ import re
 import logging
 from pathlib import Path
 
+from app.services.text_sanitizer import sanitize_indexed_text, strip_pymupdf_markers
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,10 +75,11 @@ class DocumentProcessor:
         if not text:
             return text
 
+        # Remove image markers anywhere in the document (not only whole lines).
+        text = strip_pymupdf_markers(text)
+
         lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         cleaned_lines = []
-        image_placeholder_pattern = re.compile(r"^==>.*?(intentionally omitted|picture|image).*?<==$", re.IGNORECASE)
-        picture_text_pattern = re.compile(r"end of picture text", re.IGNORECASE)
         page_number_pattern = re.compile(r"^\s*(page\s+)?\d+\s*$", re.IGNORECASE)
 
         for line in lines:
@@ -86,12 +89,6 @@ class DocumentProcessor:
             stripped = stripped.strip()
             if not stripped:
                 cleaned_lines.append("")
-                continue
-
-            if image_placeholder_pattern.match(stripped):
-                continue
-
-            if picture_text_pattern.search(stripped):
                 continue
 
             if page_number_pattern.match(stripped):
@@ -143,7 +140,8 @@ class DocumentProcessor:
         if current:
             paragraphs.append(" ".join(current).strip())
 
-        return "\n\n".join(p for p in paragraphs if p)
+        merged = "\n\n".join(p for p in paragraphs if p)
+        return sanitize_indexed_text(merged)
 
     def _process_docx(self, file_path: str) -> tuple[str, dict]:
         """Extract text from Word documents using python-docx."""

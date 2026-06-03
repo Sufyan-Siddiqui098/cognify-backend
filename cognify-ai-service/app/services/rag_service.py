@@ -11,6 +11,17 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Queries that benefit from reading-order (page/chunk index) rather than pure similarity rank.
+_READING_ORDER_QUERY = re.compile(
+    r"\b("
+    r"generations?|history|timeline|chronolog|evolution|phases?|stages?|eras?|"
+    r"versions?|chapters?|sections?|steps?|sequence|progression|development of|"
+    r"over time|from .+ to|first|second|third|fourth|fifth|all\b.+\bof\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 class RAGService:
     def __init__(self, embedding_service: EmbeddingService, vector_store: VectorStore, llm_service: LLMService):
         self.embedding_service = embedding_service
@@ -24,7 +35,13 @@ class RAGService:
         query_embedding = await self.embedding_service.generate_embedding(query)
 
         # Request a larger candidate pool so filtering can still return top_k results
-        pool_k = max(top_k * getattr(settings, "SEARCH_POOL_MULTIPLIER", 3), top_k)
+        pool_multiplier = getattr(settings, "SEARCH_POOL_MULTIPLIER", 3)
+        if self._prefers_reading_order(query):
+            pool_multiplier = max(
+                pool_multiplier,
+                getattr(settings, "SEQUENTIAL_SEARCH_POOL_MULTIPLIER", 5),
+            )
+        pool_k = max(top_k * pool_multiplier, top_k)
         results = await self.vector_store.search(query_embedding, user_id, int(pool_k))
 
         # Filter by strict retrieval threshold first
@@ -65,9 +82,37 @@ class RAGService:
                         if len((r.get("metadata", {}).get("content") or "").strip()) >= min_len
                     ]
 
-        # Sort and return only the requested number of results
-        filtered.sort(key=lambda x: x.get('score', 0), reverse=True)
+        filtered = self._order_results(filtered, query)
         return filtered[:top_k]
+
+    @staticmethod
+    def _prefers_reading_order(query: str) -> bool:
+        if not query:
+            return False
+        return bool(_READING_ORDER_QUERY.search(query))
+
+    @staticmethod
+    def _reading_order_key(result: Dict) -> tuple:
+        meta = result.get("metadata") or {}
+        page = meta.get("page_number")
+        chunk_index = meta.get("chunk_index")
+        return (
+            str(meta.get("document_id") or ""),
+            int(page) if page is not None else 0,
+            int(chunk_index) if chunk_index is not None else 0,
+        )
+
+    def _order_results(self, results: List[Dict], query: str) -> List[Dict]:
+        if not results:
+            return results
+
+        if self._prefers_reading_order(query):
+            ordered = sorted(results, key=self._reading_order_key)
+            logger.info("Reordered %d retrieval hits by document reading order", len(ordered))
+            return ordered
+
+        results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return results
     
     async def generate(
         self,

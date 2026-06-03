@@ -18,12 +18,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -49,6 +52,13 @@ import java.util.HashMap;
 public class RagService {
 
     private static final int DEFAULT_TOP_K = 15;
+
+    private static final Pattern READING_ORDER_QUERY = Pattern.compile(
+            "\\b(generations?|history|timeline|chronolog|evolution|phases?|stages?|eras?|"
+                    + "versions?|chapters?|sections?|steps?|sequence|progression|development of|"
+                    + "over time|from .+ to|first|second|third|fourth|fifth|all\\b.+\\bof\\b)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
 
     private final MessageRepository messageRepository;
     private final MessageSourceRepository messageSourceRepository;
@@ -84,8 +94,9 @@ public class RagService {
         try {
             // Step 1: Retrieve relevant chunks via Python AI Service
             SearchResultWithScores searchResult = retrieveRelevantChunks(userId, userMessage);
-            List<Chunk> relevantChunks = searchResult.chunks;
-            List<Float> relevanceScores = searchResult.scores;
+            SearchResultWithScores ordered = orderChunksForQuery(searchResult, userMessage);
+            List<Chunk> relevantChunks = ordered.chunks;
+            List<Float> relevanceScores = ordered.scores;
             log.info("Retrieved {} relevant chunks", relevantChunks.size());
 
             // Step 2: Build context from chunks
@@ -295,6 +306,56 @@ public class RagService {
         });
     }
 
+    private boolean prefersReadingOrder(String query) {
+        return query != null && READING_ORDER_QUERY.matcher(query).find();
+    }
+
+    private SearchResultWithScores orderChunksForQuery(SearchResultWithScores searchResult, String query) {
+        if (searchResult.chunks == null || searchResult.chunks.isEmpty() || !prefersReadingOrder(query)) {
+            return searchResult;
+        }
+
+        List<Integer> indices = IntStream.range(0, searchResult.chunks.size())
+                .boxed()
+                .sorted(Comparator
+                        .comparing((Integer i) -> searchResult.chunks.get(i).getDocumentId())
+                        .thenComparing(i -> {
+                            Integer page = searchResult.chunks.get(i).getPageNumber();
+                            return page != null ? page : 0;
+                        })
+                        .thenComparing(i -> {
+                            Integer index = searchResult.chunks.get(i).getChunkIndex();
+                            return index != null ? index : 0;
+                        }))
+                .collect(Collectors.toList());
+
+        List<Chunk> orderedChunks = new ArrayList<>();
+        List<Float> orderedScores = new ArrayList<>();
+        for (Integer index : indices) {
+            orderedChunks.add(searchResult.chunks.get(index));
+            if (index < searchResult.scores.size()) {
+                orderedScores.add(searchResult.scores.get(index));
+            }
+        }
+
+        log.info("Reordered {} chunks by document reading order for query", orderedChunks.size());
+        return new SearchResultWithScores(orderedChunks, orderedScores);
+    }
+
+    private int resolveMaxTokens(String userMessage) {
+        if (userMessage == null) {
+            return 1200;
+        }
+        String text = userMessage.toLowerCase();
+        if (text.matches(".*\\b(summarize|summary|in short|briefly|tl;dr)\\b.*")) {
+            return 450;
+        }
+        if (text.matches(".*\\b(explain|describe|tell me about|overview|in detail|generations?|history of|timeline|walk me through|elaborate)\\b.*")) {
+            return 1600;
+        }
+        return 1200;
+    }
+
     /**
      * Build context string from retrieved chunks for the LLM prompt.
      */
@@ -353,7 +414,21 @@ public class RagService {
             grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(chunk);
         }
 
-        for (List<Chunk> group : grouped.values()) {
+        List<String> sortedGroupKeys = new ArrayList<>(grouped.keySet());
+        sortedGroupKeys.sort((left, right) -> {
+            String[] leftParts = left.split(":", 2);
+            String[] rightParts = right.split(":", 2);
+            int docCompare = leftParts[0].compareTo(rightParts[0]);
+            if (docCompare != 0) {
+                return docCompare;
+            }
+            int leftPage = leftParts.length > 1 ? Integer.parseInt(leftParts[1]) : 0;
+            int rightPage = rightParts.length > 1 ? Integer.parseInt(rightParts[1]) : 0;
+            return Integer.compare(leftPage, rightPage);
+        });
+
+        for (String groupKey : sortedGroupKeys) {
+            List<Chunk> group = grouped.get(groupKey);
             group.sort((a, b) -> Integer.compare(
                 a.getChunkIndex() != null ? a.getChunkIndex() : 0,
                 b.getChunkIndex() != null ? b.getChunkIndex() : 0
@@ -445,8 +520,8 @@ public class RagService {
             historyList.add(msgMap);
         }
         requestBody.put("chat_history", historyList);
-        requestBody.put("temperature", 0.7);
-        requestBody.put("max_tokens", 1000);
+        requestBody.put("temperature", 0.5);
+        requestBody.put("max_tokens", resolveMaxTokens(userMessage));
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
         try {

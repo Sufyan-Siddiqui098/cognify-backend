@@ -2,6 +2,8 @@
 import logging
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from app.services.text_sanitizer import sanitize_indexed_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +40,7 @@ class ChunkingService:
         split_chunks = self.splitter.split_text(text)
 
         for split_chunk in split_chunks:
-            chunk = split_chunk.strip()
+            chunk = sanitize_indexed_text(split_chunk.strip())
             if not chunk:
                 continue
 

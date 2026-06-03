@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     MIN_RETRIEVAL_SCORE_FALLBACK: float = 0.45
     # When retrieving more candidates before filtering, multiply requested top_k
     SEARCH_POOL_MULTIPLIER: int = 3
+    # Larger pool when the query implies chronological / in-document order (e.g. generations, timeline)
+    SEQUENTIAL_SEARCH_POOL_MULTIPLIER: int = 5
+
+    # LLM context budgeting (keeps Ollama within practical context limits)
+    LLM_MAX_CONTEXT_CHARS: int = 10000
+    LLM_DISPLAY_SNIPPET_CHARS: int = 280
+    LLM_MAX_TOKENS_DEFAULT: int = 1200
+    LLM_MAX_TOKENS_SUMMARY: int = 450
+    LLM_MAX_TOKENS_DETAILED: int = 1600
     
     # Storage
     STORAGE_BASE_PATH: str = "./uploads"

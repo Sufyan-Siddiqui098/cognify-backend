@@ -4,9 +4,12 @@ LOCAL LLM using Ollama
 import logging
 import re
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import requests
+
+from app.config import get_settings
+from app.services.text_sanitizer import sanitize_indexed_text
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +105,25 @@ class LLMService:
                 )
 
                 parsed_chunks = self._extract_source_chunks(context)
+                settings = get_settings()
+                llm_chunks = self._select_chunks_for_generation(
+                    parsed_chunks,
+                    getattr(settings, "LLM_MAX_CONTEXT_CHARS", 10000),
+                )
+                intent = self._detect_intent(user_message)
+                effective_max_tokens = self._max_tokens_for_intent(
+                    intent,
+                    max_tokens,
+                    settings,
+                )
                 system_prompt = self._build_system_prompt()
-                prompt = self._build_prompt(system_prompt, parsed_chunks, chat_history, user_message)
+                prompt = self._build_prompt(
+                    system_prompt,
+                    llm_chunks,
+                    chat_history,
+                    user_message,
+                    intent,
+                )
 
                 response = requests.post(
                     f"{self.ollama_url}/api/generate",
@@ -113,7 +133,7 @@ class LLMService:
                         "stream": False,
                         "options": {
                             "temperature": temperature,
-                            "num_predict": max_tokens,
+                            "num_predict": effective_max_tokens,
                         },
                     },
                     timeout=(5, timeout),  # (connection timeout, read timeout)
@@ -124,10 +144,15 @@ class LLMService:
 
                 result = response.json()
                 answer_text = result.get("response", "").strip()
-                if self._is_no_answer_response(answer_text) and self._has_query_evidence(user_message, parsed_chunks):
+                if self._is_no_answer_response(answer_text) and self._has_query_evidence(user_message, llm_chunks):
                     logger.info("LLM returned no-answer despite evidence; using extractive fallback.")
-                    answer_text = self._build_extractive_answer(parsed_chunks)
-                structured_response = self.compose_structured_response(parsed_chunks, answer_text)
+                    answer_text = self._build_extractive_answer(llm_chunks, intent=intent)
+                display_snippet_chars = getattr(settings, "LLM_DISPLAY_SNIPPET_CHARS", 280)
+                structured_response = self.compose_structured_response(
+                    parsed_chunks,
+                    answer_text,
+                    display_snippet_chars=display_snippet_chars,
+                )
 
                 # Mark first request as complete on success
                 if self._first_request:
@@ -221,22 +246,91 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
             ]
         )
 
-    def _build_extractive_answer(self, chunks: List[Dict[str, str]], max_chars: int = 1200) -> str:
+    def _build_extractive_answer(
+        self,
+        chunks: List[Dict[str, str]],
+        max_chars: int = 1200,
+        intent: str = "semantic-search",
+    ) -> str:
         if not chunks:
             return ""
 
-        primary = chunks[0]
-        content = (primary.get("content") or "").strip()
-        if len(content) > max_chars:
-            content = content[:max_chars].rstrip() + "..."
+        if intent == "summary":
+            max_chars = min(max_chars, 700)
+        elif intent in {"explain", "semantic-search"}:
+            max_chars = min(max_chars * 2, 2400)
 
-        document_name = primary.get("document_name") or "Unknown document"
-        page_number = primary.get("page_number") or ""
+        parts = []
+        used = 0
+        for chunk in chunks[:4]:
+            content = (chunk.get("content") or "").strip()
+            if not content:
+                continue
+            remaining = max_chars - used
+            if remaining <= 0:
+                break
+            if len(content) > remaining:
+                content = content[:remaining].rstrip() + "..."
+            parts.append(content)
+            used += len(content)
+
+        document_name = chunks[0].get("document_name") or "Unknown document"
+        page_number = chunks[0].get("page_number") or ""
         source_line = f"Source: {document_name}"
         if page_number:
             source_line += f", Page {page_number}"
 
-        return f"{content}\n\n{source_line}"
+        return f"{' '.join(parts)}\n\n{source_line}"
+
+    def _select_chunks_for_generation(
+        self,
+        chunks: List[Dict[str, str]],
+        max_chars: int,
+    ) -> List[Dict[str, str]]:
+        if not chunks or max_chars <= 0:
+            return chunks
+
+        selected: List[Dict[str, str]] = []
+        used = 0
+        for chunk in chunks:
+            content = (chunk.get("content") or "").strip()
+            if not content:
+                continue
+            if used + len(content) > max_chars and selected:
+                break
+            if used + len(content) > max_chars:
+                chunk = {**chunk, "content": content[: max_chars - used].rstrip() + "..."}
+                selected.append(chunk)
+                break
+            selected.append(chunk)
+            used += len(content)
+
+        if not selected and chunks:
+            selected.append(chunks[0])
+
+        if len(selected) < len(chunks):
+            logger.info(
+                "LLM context budget: using %d/%d chunks (~%d chars)",
+                len(selected),
+                len(chunks),
+                used,
+            )
+        return selected
+
+    def _max_tokens_for_intent(self, intent: str, requested: int, settings) -> int:
+        defaults = {
+            "summary": getattr(settings, "LLM_MAX_TOKENS_SUMMARY", 450),
+            "definition": 700,
+            "exam": 900,
+            "compare": 900,
+            "steps": 900,
+            "explain": getattr(settings, "LLM_MAX_TOKENS_DETAILED", 1600),
+            "semantic-search": getattr(settings, "LLM_MAX_TOKENS_DEFAULT", 1200),
+        }
+        intent_cap = defaults.get(intent, defaults["semantic-search"])
+        if requested <= 0:
+            return min(intent_cap, 2048)
+        return min(requested, intent_cap, 2048)
 
     def _detect_intent(self, user_message: str) -> str:
         text = user_message.lower()
@@ -251,21 +345,41 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
             return "steps"
         if re.search(r"\b(define|definition|what is|meaning)\b", text):
             return "definition"
+        if re.search(
+            r"\b(explain|describe|tell me about|overview|in detail|generations?|"
+            r"history of|timeline|walk me through|elaborate)\b",
+            text,
+        ):
+            return "explain"
         return "semantic-search"
 
     def _intent_style_prompt(self, intent: str) -> str:
         styles = {
             "exam": (
-                "Style: exam-ready. First give a one-line direct answer, then 3-5 key bullet points, "
-                "then one short example if available in the chunks."
+                "Length: medium. Give a one-line direct answer, then 3-5 bullet points, "
+                "then one short example only if it appears in the chunks."
             ),
-            "summary": "Style: concise summary with 3-6 bullets and no extra filler.",
-            "compare": "Style: comparison table-like bullets (A vs B) using only chunk evidence.",
-            "steps": "Style: numbered steps, clear sequence, practical wording.",
-            "definition": "Style: definition first, then core components and one chunk-based example.",
+            "summary": (
+                "Length: short. Provide a tight summary in 3-6 bullets or 4-5 sentences. "
+                "No filler and no outside knowledge."
+            ),
+            "compare": (
+                "Length: medium. Use comparison-style bullets (A vs B) using only chunk evidence."
+            ),
+            "steps": (
+                "Length: medium. Use numbered steps in the order implied by the chunks."
+            ),
+            "definition": (
+                "Length: medium. Start with a definition, then 2-4 supporting points from the chunks."
+            ),
+            "explain": (
+                "Length: detailed. Write multiple coherent paragraphs that synthesize all relevant "
+                "chunks. Cover distinct points from the evidence; use bullets only when listing items "
+                "explicitly present in the text."
+            ),
             "semantic-search": (
-                "Style: concise and directly useful for retrieval tasks; answer first, then supporting "
-                "points grounded in the chunks."
+                "Length: adaptive. If the chunks cover several related points, use 2-4 short paragraphs "
+                "or structured bullets. If only one fact is present, answer in 2-4 sentences."
             ),
         }
         return styles.get(intent, styles["semantic-search"])
@@ -285,7 +399,7 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
                 {
                     "document_name": match.group("document_name").strip(),
                     "page_number": match.group("page_number") or "",
-                    "content": match.group("content").strip(),
+                    "content": sanitize_indexed_text(match.group("content").strip()),
                 }
             )
 
@@ -298,7 +412,17 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
 
         return []
 
-    def _format_top_matches(self, chunks: List[Dict[str, str]]) -> str:
+    def _truncate_snippet(self, text: str, max_chars: int) -> str:
+        cleaned = (text or "").strip()
+        if max_chars <= 0 or len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars].rstrip() + "..."
+
+    def _format_top_matches(
+        self,
+        chunks: List[Dict[str, str]],
+        display_snippet_chars: Optional[int] = None,
+    ) -> str:
         lines = ["---", "📄 TOP MATCHES FROM YOUR DOCUMENTS:"]
 
         if not chunks:
@@ -309,21 +433,34 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
             document_name = chunk.get("document_name") or "Unknown document"
             page_number = chunk.get("page_number") or "N/A"
             content = (chunk.get("content") or "").strip()
+            if display_snippet_chars:
+                content = self._truncate_snippet(content, display_snippet_chars)
             lines.append(f"{index}. [{document_name}, Page {page_number}]")
             lines.append(f"   {content}")
 
         return "\n".join(lines)
 
-    def compose_structured_response(self, chunks: List[Dict[str, str]], answer_text: str) -> str:
-        top_matches_block = self._format_top_matches(chunks)
+    def compose_structured_response(
+        self,
+        chunks: List[Dict[str, str]],
+        answer_text: str,
+        display_snippet_chars: Optional[int] = None,
+    ) -> str:
+        top_matches_block = self._format_top_matches(chunks, display_snippet_chars)
         answer_body = (answer_text or "").strip() or (
             "The AI answer could not be generated, but the retrieved document evidence is shown above."
         )
 
         return f"{top_matches_block}\n\n---\n💡 ANSWER:\n{answer_body}"
 
-    def _build_prompt(self, system_prompt: str, chunks: List[Dict[str, str]], chat_history: List[Dict], user_message: str) -> str:
-        intent = self._detect_intent(user_message)
+    def _build_prompt(
+        self,
+        system_prompt: str,
+        chunks: List[Dict[str, str]],
+        chat_history: List[Dict],
+        user_message: str,
+        intent: str,
+    ) -> str:
         style_prompt = self._intent_style_prompt(intent)
 
         prompt = f"{system_prompt}\n\n"
@@ -332,7 +469,11 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
         prompt += "CASE 2 - If the chunks are related to the topic but don't directly answer the query: Say: \"Your documents don't contain a direct answer to this query. However, the closest information found suggests: [brief summary of what the chunks do say]. You may want to search with a different hint.\"\n"
         prompt += "CASE 3 - If the chunks are clearly unrelated to the query: Say: \"This specific information does not appear to be in your uploaded documents. The closest matches found were about [topic of chunks]. Try uploading relevant documents or rephrasing your query.\"\n"
         prompt += "If any chunk contains the answer, do not use Case 2 or Case 3.\n"
-        prompt += "Never add information from outside the provided chunks. Never guess or infer beyond what the text explicitly states. Keep the response concise and professional.\n\n"
+        prompt += (
+            "Never add information from outside the provided chunks. Never guess or infer beyond "
+            "what the text explicitly states. Match the requested length style; do not artificially "
+            "shorten a multi-part answer when multiple chunks contain distinct relevant facts.\n\n"
+        )
         prompt += f"{style_prompt}\n\n"
 
         for msg in chat_history[-5:]:

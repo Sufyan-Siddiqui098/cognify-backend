@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 import requests
 
 from app.config import get_settings
+from app.services.query_signals import resolve_summary_intent
 from app.services.text_sanitizer import sanitize_indexed_text
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class LLMService:
                     parsed_chunks,
                     getattr(settings, "LLM_MAX_CONTEXT_CHARS", 10000),
                 )
-                intent = self._detect_intent(user_message)
+                intent = self._resolve_intent(user_message, llm_chunks)
                 effective_max_tokens = self._max_tokens_for_intent(
                     intent,
                     max_tokens,
@@ -320,6 +321,7 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
     def _max_tokens_for_intent(self, intent: str, requested: int, settings) -> int:
         defaults = {
             "summary": getattr(settings, "LLM_MAX_TOKENS_SUMMARY", 450),
+            "summary_comprehensive": getattr(settings, "LLM_MAX_TOKENS_DETAILED", 1600),
             "definition": 700,
             "exam": 900,
             "compare": 900,
@@ -332,12 +334,18 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
             return min(intent_cap, 2048)
         return min(requested, intent_cap, 2048)
 
+    def _resolve_intent(self, user_message: str, chunks: List[Dict[str, str]]) -> str:
+        base_intent = self._detect_intent(user_message)
+        if base_intent == "summary":
+            return resolve_summary_intent(user_message, chunks)
+        return base_intent
+
     def _detect_intent(self, user_message: str) -> str:
         text = user_message.lower()
 
         if re.search(r"\b(exam|test|viva|marks|write in exam|exam answer)\b", text):
             return "exam"
-        if re.search(r"\b(summarize|summary|in short|briefly|tl;dr)\b", text):
+        if re.search(r"\b(summarize|summary)\b", text):
             return "summary"
         if re.search(r"\b(compare|difference|vs\b|versus|contrast)\b", text):
             return "compare"
@@ -346,7 +354,7 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
         if re.search(r"\b(define|definition|what is|meaning)\b", text):
             return "definition"
         if re.search(
-            r"\b(explain|describe|tell me about|overview|in detail|generations?|"
+            r"\b(explain|describe|tell me about|overview|in detail|"
             r"history of|timeline|walk me through|elaborate)\b",
             text,
         ):
@@ -363,6 +371,12 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
                 "Length: short. Provide a tight summary in 3-6 bullets or 4-5 sentences. "
                 "No filler and no outside knowledge."
             ),
+            "summary_comprehensive": (
+                "Length: comprehensive but grounded. Synthesize all distinct topics, sections, or "
+                "steps present across the chunks in logical order. Do not stop after the first "
+                "section. Use bullets or short paragraphs per major part only when the source "
+                "material is structured that way."
+            ),
             "compare": (
                 "Length: medium. Use comparison-style bullets (A vs B) using only chunk evidence."
             ),
@@ -374,7 +388,8 @@ If any chunk clearly contains the answer, you must use case 1. Do not claim the 
             ),
             "explain": (
                 "Length: detailed. Write multiple coherent paragraphs that synthesize all relevant "
-                "chunks. Cover distinct points from the evidence; use bullets only when listing items "
+                "chunks. If the chunks describe multiple sections, phases, or timeline steps, cover "
+                "each one in order and do not stop after the first. Use bullets only when listing items "
                 "explicitly present in the text."
             ),
             "semantic-search": (

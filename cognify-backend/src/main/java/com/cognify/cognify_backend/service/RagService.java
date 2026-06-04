@@ -19,9 +19,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -54,10 +56,34 @@ public class RagService {
     private static final int DEFAULT_TOP_K = 15;
 
     private static final Pattern READING_ORDER_QUERY = Pattern.compile(
-            "\\b(generations?|history|timeline|chronolog|evolution|phases?|stages?|eras?|"
+            "\\b(history|timeline|chronolog|evolution|phases?|stages?|eras?|"
                     + "versions?|chapters?|sections?|steps?|sequence|progression|development of|"
-                    + "over time|from .+ to|first|second|third|fourth|fifth|all\\b.+\\bof\\b)\\b",
+                    + "over time|from .+ to|first|second|third|fourth|fifth)\\b"
+                    + "|(?:summarize|summary of)\\s+the\\s+\\w+(?:\\s+\\w+){0,3}\\s+of\\b",
             Pattern.CASE_INSENSITIVE
+    );
+
+    private static final Pattern BROAD_COVERAGE_QUERY = Pattern.compile(
+            "\\b(all|each|every|entire|whole|complete|full|overview of|outline of|list of)\\b"
+                    + "|(?:summarize|summary of)\\s+the\\s+\\w+(?:\\s+\\w+){0,3}\\s+of\\b"
+                    + "|\\b(history|timeline|chronolog|evolution|phases?|stages?|eras?|versions?|"
+                    + "chapters?|sections?|steps?|types|kinds|categories|periods|components|parts|"
+                    + "aspects|sequence|progression|development)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    private static final Pattern BRIEF_SUMMARY_QUERY = Pattern.compile(
+            "\\b(in short|briefly|tl;dr|one paragraph|few sentences|short summary|quick summary)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    private static final Set<String> TOPIC_STOPWORDS = Set.of(
+            "the", "and", "for", "with", "that", "this", "from", "what", "when", "where",
+            "which", "would", "could", "should", "about", "your", "their", "they", "them",
+            "were", "been", "has", "have", "but", "into", "there", "here", "then", "than",
+            "also", "only", "just", "will", "dont", "does", "doesnt", "did", "didnt", "cant",
+            "cannot", "its", "you", "are", "was", "who", "why", "how", "can", "summarize",
+            "summary", "briefly", "short", "explain", "describe", "tell", "give", "please"
     );
 
     private final MessageRepository messageRepository;
@@ -94,7 +120,8 @@ public class RagService {
         try {
             // Step 1: Retrieve relevant chunks via Python AI Service
             SearchResultWithScores searchResult = retrieveRelevantChunks(userId, userMessage);
-            SearchResultWithScores ordered = orderChunksForQuery(searchResult, userMessage);
+            SearchResultWithScores filtered = filterLowQualityChunks(searchResult);
+            SearchResultWithScores ordered = orderChunksForQuery(filtered, userMessage);
             List<Chunk> relevantChunks = ordered.chunks;
             List<Float> relevanceScores = ordered.scores;
             log.info("Retrieved {} relevant chunks", relevantChunks.size());
@@ -307,7 +334,119 @@ public class RagService {
     }
 
     private boolean prefersReadingOrder(String query) {
-        return query != null && READING_ORDER_QUERY.matcher(query).find();
+        if (query == null) {
+            return false;
+        }
+        if (READING_ORDER_QUERY.matcher(query).find()) {
+            return true;
+        }
+        return query.toLowerCase().matches(".*\\b(summarize|summary)\\b.*")
+                && BROAD_COVERAGE_QUERY.matcher(query).find();
+    }
+
+    private List<String> topicTermsFromQuery(String query) {
+        if (query == null) {
+            return List.of();
+        }
+        List<String> terms = new ArrayList<>();
+        for (String token : query.toLowerCase().split("[^a-z0-9]+")) {
+            if (token.length() > 3 && !TOPIC_STOPWORDS.contains(token)) {
+                terms.add(token);
+            }
+        }
+        return terms;
+    }
+
+    private double documentFocusScore(String combinedText, List<String> topicTerms, int chunkCount, float bestScore) {
+        String lowered = combinedText.toLowerCase();
+        int termHits = 0;
+        for (String term : topicTerms) {
+            int from = 0;
+            while ((from = lowered.indexOf(term, from)) >= 0) {
+                termHits++;
+                from += term.length();
+            }
+        }
+        int structure = 0;
+        for (String line : combinedText.split("\\R")) {
+            if (line.trim().startsWith("#")) {
+                structure++;
+            }
+        }
+        structure += combinedText.split("(?m)^\\s*\\d+[.)]\\s+").length - 1;
+        return termHits * 10.0 + structure * 2.0 + chunkCount + bestScore;
+    }
+
+    private SearchResultWithScores filterLowQualityChunks(SearchResultWithScores searchResult) {
+        if (searchResult.chunks == null || searchResult.chunks.isEmpty()) {
+            return searchResult;
+        }
+
+        List<Chunk> keptChunks = new ArrayList<>();
+        List<Float> keptScores = new ArrayList<>();
+        for (int i = 0; i < searchResult.chunks.size(); i++) {
+            Chunk chunk = searchResult.chunks.get(i);
+            if (!isLowQualityChunk(chunk)) {
+                keptChunks.add(chunk);
+                if (i < searchResult.scores.size()) {
+                    keptScores.add(searchResult.scores.get(i));
+                }
+            }
+        }
+
+        if (keptChunks.isEmpty()) {
+            return searchResult;
+        }
+
+        if (keptChunks.size() < searchResult.chunks.size()) {
+            log.info("Filtered {} low-quality chunks", searchResult.chunks.size() - keptChunks.size());
+        }
+        return new SearchResultWithScores(keptChunks, keptScores);
+    }
+
+    private boolean isLowQualityChunk(Chunk chunk) {
+        String content = chunk.getContent() != null ? chunk.getContent().trim() : "";
+        if (content.isEmpty()) {
+            return true;
+        }
+        if (content.split("-----", -1).length - 1 >= 2) {
+            return true;
+        }
+        long headerCount = content.lines().filter(line -> line.trim().startsWith("#")).count();
+        if (headerCount >= 6 && content.length() < 500) {
+            return true;
+        }
+        return content.toLowerCase().contains("## computer.") && content.toLowerCase().contains("computer.");
+    }
+
+    private UUID resolvePrimaryDocumentId(SearchResultWithScores searchResult, String query) {
+        Map<UUID, List<Integer>> indicesByDocument = new HashMap<>();
+        for (int i = 0; i < searchResult.chunks.size(); i++) {
+            UUID documentId = searchResult.chunks.get(i).getDocumentId();
+            indicesByDocument.computeIfAbsent(documentId, ignored -> new ArrayList<>()).add(i);
+        }
+
+        if (indicesByDocument.isEmpty()) {
+            return null;
+        }
+
+        List<String> topicTerms = topicTermsFromQuery(query);
+
+        return indicesByDocument.keySet().stream()
+                .max(Comparator.comparing(documentId -> {
+                    List<Integer> indices = indicesByDocument.get(documentId);
+                    String combined = indices.stream()
+                            .map(i -> searchResult.chunks.get(i).getContent() != null
+                                    ? searchResult.chunks.get(i).getContent()
+                                    : "")
+                            .collect(Collectors.joining("\n"));
+                    float bestScore = indices.stream()
+                            .map(i -> i < searchResult.scores.size() ? searchResult.scores.get(i) : 0.0f)
+                            .max(Float::compareTo)
+                            .orElse(0.0f);
+                    return documentFocusScore(combined, topicTerms, indices.size(), bestScore);
+                }))
+                .orElse(null);
     }
 
     private SearchResultWithScores orderChunksForQuery(SearchResultWithScores searchResult, String query) {
@@ -315,10 +454,18 @@ public class RagService {
             return searchResult;
         }
 
+        UUID focusDocumentId = resolvePrimaryDocumentId(searchResult, query);
+
         List<Integer> indices = IntStream.range(0, searchResult.chunks.size())
                 .boxed()
                 .sorted(Comparator
-                        .comparing((Integer i) -> searchResult.chunks.get(i).getDocumentId())
+                        .comparing((Integer i) -> {
+                            UUID docId = searchResult.chunks.get(i).getDocumentId();
+                            if (focusDocumentId != null && focusDocumentId.equals(docId)) {
+                                return 0;
+                            }
+                            return 1;
+                        })
                         .thenComparing(i -> {
                             Integer page = searchResult.chunks.get(i).getPageNumber();
                             return page != null ? page : 0;
@@ -347,10 +494,16 @@ public class RagService {
             return 1200;
         }
         String text = userMessage.toLowerCase();
-        if (text.matches(".*\\b(summarize|summary|in short|briefly|tl;dr)\\b.*")) {
+        if (text.matches(".*\\b(summarize|summary)\\b.*")) {
+            if (BRIEF_SUMMARY_QUERY.matcher(userMessage).find()) {
+                return 450;
+            }
+            if (BROAD_COVERAGE_QUERY.matcher(userMessage).find()) {
+                return 1600;
+            }
             return 450;
         }
-        if (text.matches(".*\\b(explain|describe|tell me about|overview|in detail|generations?|history of|timeline|walk me through|elaborate)\\b.*")) {
+        if (text.matches(".*\\b(explain|describe|tell me about|overview|in detail|history of|timeline|walk me through|elaborate)\\b.*")) {
             return 1600;
         }
         return 1200;

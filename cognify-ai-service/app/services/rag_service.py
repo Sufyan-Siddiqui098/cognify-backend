@@ -2,24 +2,20 @@
 RAG orchestration 
 """
 import logging
-from typing import List, Dict
+from collections import defaultdict
+from typing import List, Dict, Optional
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import VectorStore
 from app.services.llm_service import LLMService, LLMUnavailableError
 from app.config import get_settings
+from app.services.query_signals import (
+    document_focus_score,
+    query_prefers_reading_order,
+    topic_terms_from_query,
+)
 import re
 
 logger = logging.getLogger(__name__)
-
-# Queries that benefit from reading-order (page/chunk index) rather than pure similarity rank.
-_READING_ORDER_QUERY = re.compile(
-    r"\b("
-    r"generations?|history|timeline|chronolog|evolution|phases?|stages?|eras?|"
-    r"versions?|chapters?|sections?|steps?|sequence|progression|development of|"
-    r"over time|from .+ to|first|second|third|fourth|fifth|all\b.+\bof\b"
-    r")\b",
-    re.IGNORECASE,
-)
 
 
 class RAGService:
@@ -82,22 +78,84 @@ class RAGService:
                         if len((r.get("metadata", {}).get("content") or "").strip()) >= min_len
                     ]
 
+        filtered = self._drop_low_quality_chunks(filtered)
         filtered = self._order_results(filtered, query)
         return filtered[:top_k]
 
     @staticmethod
-    def _prefers_reading_order(query: str) -> bool:
-        if not query:
-            return False
-        return bool(_READING_ORDER_QUERY.search(query))
+    def _chunk_text(result: Dict) -> str:
+        return (result.get("metadata", {}).get("content") or "").strip()
 
     @staticmethod
-    def _reading_order_key(result: Dict) -> tuple:
+    def _is_low_quality_chunk(result: Dict) -> bool:
+        content = RAGService._chunk_text(result)
+        if not content:
+            return True
+        if content.count("-----") >= 2:
+            return True
+        header_count = len(re.findall(r"^#+\s", content, re.MULTILINE))
+        if header_count >= 6 and len(content) < 500:
+            return True
+        if re.search(r"##\s*computer\.?\s*\n+\s*computer\.?", content, re.IGNORECASE):
+            return True
+        words = re.findall(r"[a-zA-Z]{3,}", content)
+        if len(words) >= 8:
+            short_words = sum(1 for w in words if len(w) <= 3)
+            if short_words / len(words) > 0.45:
+                return True
+        return False
+
+    def _drop_low_quality_chunks(self, results: List[Dict]) -> List[Dict]:
+        kept = [r for r in results if not self._is_low_quality_chunk(r)]
+        if kept:
+            removed = len(results) - len(kept)
+            if removed:
+                logger.info("Filtered %d low-quality retrieval chunks", removed)
+            return kept
+        logger.warning("All retrieval chunks looked low-quality; keeping original set")
+        return results
+
+    @staticmethod
+    def _primary_document_id(results: List[Dict], query: str) -> Optional[str]:
+        if not results:
+            return None
+
+        by_doc: dict[str, List[Dict]] = defaultdict(list)
+        for result in results:
+            doc_id = str((result.get("metadata") or {}).get("document_id") or "")
+            if doc_id:
+                by_doc[doc_id].append(result)
+
+        if not by_doc:
+            return None
+
+        topic_terms = topic_terms_from_query(query or "")
+
+        def doc_score(doc_results: List[Dict]) -> tuple:
+            combined = "\n".join(RAGService._chunk_text(r) for r in doc_results)
+            best_score = max((r.get("score") or 0) for r in doc_results)
+            return document_focus_score(
+                combined,
+                topic_terms,
+                len(doc_results),
+                best_score,
+            )
+
+        return max(by_doc.keys(), key=lambda doc_id: doc_score(by_doc[doc_id]))
+
+    @staticmethod
+    def _prefers_reading_order(query: str) -> bool:
+        return query_prefers_reading_order(query)
+
+    @staticmethod
+    def _reading_order_key(result: Dict, focus_document_id: Optional[str] = None) -> tuple:
         meta = result.get("metadata") or {}
+        doc_id = str(meta.get("document_id") or "")
         page = meta.get("page_number")
         chunk_index = meta.get("chunk_index")
+        focus_rank = 0 if focus_document_id and doc_id == focus_document_id else 1
         return (
-            str(meta.get("document_id") or ""),
+            focus_rank,
             int(page) if page is not None else 0,
             int(chunk_index) if chunk_index is not None else 0,
         )
@@ -107,8 +165,16 @@ class RAGService:
             return results
 
         if self._prefers_reading_order(query):
-            ordered = sorted(results, key=self._reading_order_key)
-            logger.info("Reordered %d retrieval hits by document reading order", len(ordered))
+            focus_doc = self._primary_document_id(results, query)
+            ordered = sorted(
+                results,
+                key=lambda r: self._reading_order_key(r, focus_doc),
+            )
+            logger.info(
+                "Reordered %d retrieval hits (focus document=%s)",
+                len(ordered),
+                focus_doc,
+            )
             return ordered
 
         results.sort(key=lambda x: x.get("score", 0), reverse=True)

@@ -148,12 +148,22 @@ class LLMService:
                 if self._is_no_answer_response(answer_text) and self._has_query_evidence(user_message, llm_chunks):
                     logger.info("LLM returned no-answer despite evidence; using extractive fallback.")
                     answer_text = self._build_extractive_answer(llm_chunks, intent=intent)
-                display_snippet_chars = getattr(settings, "LLM_DISPLAY_SNIPPET_CHARS", 280)
-                structured_response = self.compose_structured_response(
-                    parsed_chunks,
-                    answer_text,
-                    display_snippet_chars=display_snippet_chars,
-                )
+
+                # Determine what to store as message content.
+                # "answer_only" = clean answer text only; sources[] is the UI's evidence panel.
+                # "structured" = legacy TOP MATCHES block embedded in content (for older clients).
+                response_format = getattr(settings, "LLM_RESPONSE_FORMAT", "answer_only")
+                if response_format == "answer_only":
+                    stored_response = (answer_text or "").strip() or (
+                        "The AI answer could not be generated, but the retrieved document evidence is shown above."
+                    )
+                else:
+                    display_snippet_chars = getattr(settings, "LLM_DISPLAY_SNIPPET_CHARS", 280)
+                    stored_response = self.compose_structured_response(
+                        parsed_chunks,
+                        answer_text,
+                        display_snippet_chars=display_snippet_chars,
+                    )
 
                 # Mark first request as complete on success
                 if self._first_request:
@@ -161,7 +171,7 @@ class LLMService:
                     logger.info("✓ First request completed. Model loaded into memory.")
 
                 return {
-                    "response": structured_response,
+                    "response": stored_response,
                     "model": self.model,
                     "usage": {
                         "prompt_tokens": result.get("prompt_eval_count", 0),

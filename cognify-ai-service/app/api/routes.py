@@ -20,6 +20,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import VectorStore
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
+from app.services.chunk_quality import should_keep_chunk
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,33 @@ async def process_document(request: ProcessDocumentRequest = Body(...)):
                 status_code=400,
                 detail={"code": "EMPTY_DOCUMENT", "message": "Document contains no extractable text."}
             )
-        
+
+        # ── Quality gate ────────────────────────────────────────────────────
+        # Drop junk chunks before embedding so they never pollute Qdrant.
+        # The threshold is tunable via CHUNK_QUALITY_THRESHOLD in .env.
+        quality_threshold = getattr(settings, "CHUNK_QUALITY_THRESHOLD", 0.35)
+        total_raw = len(chunks)
+        chunks = [(text, start, end) for text, start, end in chunks
+                  if should_keep_chunk(text, quality_threshold)]
+        dropped = total_raw - len(chunks)
+        if dropped:
+            logger.info(
+                "Quality gate dropped %d/%d chunks for document %s",
+                dropped, total_raw, request.document_id,
+            )
+        if not chunks:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "LOW_QUALITY_DOCUMENT",
+                    "message": (
+                        f"All {total_raw} extracted chunks failed the quality gate. "
+                        "The document may be image-only, corrupted, or contain only formatting noise."
+                    ),
+                }
+            )
+        # ── End quality gate ────────────────────────────────────────────────
+
         chunk_texts = [chunk[0] for chunk in chunks]
         embeddings = await embedding_service.generate_embeddings_batch(chunk_texts)
         
@@ -139,8 +166,12 @@ async def process_document(request: ProcessDocumentRequest = Body(...)):
             success=True,
             document_id=request.document_id,
             chunks=chunk_metadata_list,
-            total_chunks=len(chunk_metadata_list),
-            message="Document processed successfully via Local Service"
+            total_chunks=total_raw,
+            indexed_chunks=len(chunk_metadata_list),
+            message=(
+                f"Document processed successfully via Local Service "
+                f"({len(chunk_metadata_list)}/{total_raw} chunks indexed after quality gate)"
+            )
         )
     except HTTPException:
         raise

@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS_DEFAULT: int = 1200
     LLM_MAX_TOKENS_SUMMARY: int = 450
     LLM_MAX_TOKENS_DETAILED: int = 1600
+
+    # Response format: "answer_only" stores only the answer text in Message.content
+    # (sources[] in the API is the single evidence source for the UI).
+    # "structured" keeps the legacy TOP MATCHES block embedded in content.
+    LLM_RESPONSE_FORMAT: str = "answer_only"
+
+    # Ingestion quality gate: chunks scoring below this threshold are dropped before
+    # embedding and storing in Qdrant. Range 0.0-1.0; 0.35 is a safe default.
+    CHUNK_QUALITY_THRESHOLD: float = 0.35
     
     # Storage
     STORAGE_BASE_PATH: str = "./uploads"

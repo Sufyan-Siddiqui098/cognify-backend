@@ -44,7 +44,9 @@ class ProcessDocumentResponse(BaseModel):
     document_id: UUID
     chunks: List[ChunkMetadata]
     total_chunks: int
+    indexed_chunks: Optional[int] = None  # Chunks that passed the quality gate
     message: str
+
 
 class SearchResult(BaseModel):
     chunk_id: str

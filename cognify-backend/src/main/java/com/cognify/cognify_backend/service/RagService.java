@@ -120,8 +120,7 @@ public class RagService {
         try {
             // Step 1: Retrieve relevant chunks via Python AI Service
             SearchResultWithScores searchResult = retrieveRelevantChunks(userId, userMessage);
-            SearchResultWithScores filtered = filterLowQualityChunks(searchResult);
-            SearchResultWithScores ordered = orderChunksForQuery(filtered, userMessage);
+            SearchResultWithScores ordered = orderChunksForQuery(searchResult, userMessage);
             List<Chunk> relevantChunks = ordered.chunks;
             List<Float> relevanceScores = ordered.scores;
             log.info("Retrieved {} relevant chunks", relevantChunks.size());
@@ -377,47 +376,7 @@ public class RagService {
         return termHits * 10.0 + structure * 2.0 + chunkCount + bestScore;
     }
 
-    private SearchResultWithScores filterLowQualityChunks(SearchResultWithScores searchResult) {
-        if (searchResult.chunks == null || searchResult.chunks.isEmpty()) {
-            return searchResult;
-        }
 
-        List<Chunk> keptChunks = new ArrayList<>();
-        List<Float> keptScores = new ArrayList<>();
-        for (int i = 0; i < searchResult.chunks.size(); i++) {
-            Chunk chunk = searchResult.chunks.get(i);
-            if (!isLowQualityChunk(chunk)) {
-                keptChunks.add(chunk);
-                if (i < searchResult.scores.size()) {
-                    keptScores.add(searchResult.scores.get(i));
-                }
-            }
-        }
-
-        if (keptChunks.isEmpty()) {
-            return searchResult;
-        }
-
-        if (keptChunks.size() < searchResult.chunks.size()) {
-            log.info("Filtered {} low-quality chunks", searchResult.chunks.size() - keptChunks.size());
-        }
-        return new SearchResultWithScores(keptChunks, keptScores);
-    }
-
-    private boolean isLowQualityChunk(Chunk chunk) {
-        String content = chunk.getContent() != null ? chunk.getContent().trim() : "";
-        if (content.isEmpty()) {
-            return true;
-        }
-        if (content.split("-----", -1).length - 1 >= 2) {
-            return true;
-        }
-        long headerCount = content.lines().filter(line -> line.trim().startsWith("#")).count();
-        if (headerCount >= 6 && content.length() < 500) {
-            return true;
-        }
-        return content.toLowerCase().contains("## computer.") && content.toLowerCase().contains("computer.");
-    }
 
     private UUID resolvePrimaryDocumentId(SearchResultWithScores searchResult, String query) {
         Map<UUID, List<Integer>> indicesByDocument = new HashMap<>();
@@ -684,12 +643,15 @@ public class RagService {
                 return (String) response.getBody().get("response");
             }
         } catch (Exception e) {
-            log.warn("LLM generation unavailable (Ollama may be down). Returning raw chunks as fallback.", e);
-            // Graceful degradation: return the context directly without LLM synthesis
-            return "I found relevant information in your documents, but the AI summary service is temporarily unavailable.\n\n" + context;
+            log.warn("LLM generation unavailable (Python AI service unreachable). Returning clean fallback.", e);
+            // Return a clean status message — the frontend detects ❌ to render the
+            // "AI Service Unavailable" card. Evidence is shown via message.sources[].
+            return "❌ The local AI service is unavailable. " +
+                   "Retrieved document evidence is shown above. " +
+                   "Ensure the Python AI service is running on port 8000.";
         }
 
-        return "I'm sorry, I couldn't generate a response at this time. Please try again.";
+        return "❌ The AI service returned an unexpected response. Please try again.";
     }
 
     /**
@@ -703,9 +665,10 @@ public class RagService {
             float score = i < scores.size() ? scores.get(i) : 0.0f;
             Document doc = documentRepository.findById(chunk.getDocumentId()).orElse(null);
 
-            String snippet = chunk.getContent().length() > 200
-                    ? chunk.getContent().substring(0, 200) + "..."
-                    : chunk.getContent();
+            // Full chunk content stored — snippet column is TEXT (no length limit).
+            // The LLM also receives full content, so the UI evidence matches what
+            // the AI synthesised from.
+            String snippet = chunk.getContent();
 
             MessageSource source = MessageSource.builder()
                     .messageId(messageId)
@@ -744,57 +707,49 @@ public class RagService {
 
     /**
      * Map Chunk entity to SourceChunkDto with document metadata.
+     * Returns full chunk content — snippet column is TEXT with no length limit.
      */
     private SourceChunkDto mapChunkToSourceDto(Chunk chunk, float relevanceScore) {
         Document doc = documentRepository.findById(chunk.getDocumentId()).orElse(null);
-
-        String snippet = chunk.getContent().length() > 200
-                ? chunk.getContent().substring(0, 200) + "..."
-                : chunk.getContent();
 
         return SourceChunkDto.builder()
                 .chunkId(chunk.getId())
                 .documentId(chunk.getDocumentId())
                 .documentName(doc != null ? doc.getName() : "Unknown")
                 .pageNumber(chunk.getPageNumber())
-                .snippet(snippet)
+                .snippet(chunk.getContent())  // Full content — no truncation
                 .relevanceScore(relevanceScore)
                 .build();
     }
 
     /**
      * Map MessageSource entity to SourceChunkDto (used by ChatService for historical messages).
+     * Design: prefer the stored snapshot (message_sources.snippet) which was captured at response
      */
     public SourceChunkDto mapMessageSourceToDto(MessageSource messageSource) {
-        Chunk chunk = null;
-        if (messageSource.getChunkId() != null) {
-            chunk = chunkRepository.findById(messageSource.getChunkId()).orElse(null);
+        // Prefer stored snapshot — full content since saveMessageSources() stores it without truncation.
+        String snippet = messageSource.getSnippet();
+
+        // Fallback: if snapshot is missing (e.g. rows created before V009 migration),
+        // read from live chunk. No truncation.
+        if ((snippet == null || snippet.isBlank()) && messageSource.getChunkId() != null) {
+            Chunk chunk = chunkRepository.findById(messageSource.getChunkId()).orElse(null);
+            if (chunk != null) {
+                snippet = chunk.getContent();
+            }
         }
 
-        if (chunk != null) {
-            Document doc = documentRepository.findById(chunk.getDocumentId()).orElse(null);
+        UUID docId = messageSource.getDocumentId();
+        String docName = messageSource.getDocumentName() != null
+                ? messageSource.getDocumentName()
+                : "Unknown";
 
-            String snippet = chunk.getContent().length() > 200
-                ? chunk.getContent().substring(0, 200) + "..."
-                : chunk.getContent();
-
-            return SourceChunkDto.builder()
-                .chunkId(chunk.getId())
-                .documentId(chunk.getDocumentId())
-                .documentName(doc != null ? doc.getName() : "Unknown")
-                .pageNumber(chunk.getPageNumber())
-                .snippet(snippet)
-                .relevanceScore(messageSource.getRelevanceScore())
-                .build();
-        }
-
-        // Historical fallback: preserve citation display even after chunk reindex/delete.
         return SourceChunkDto.builder()
             .chunkId(messageSource.getChunkId())
-            .documentId(messageSource.getDocumentId())
-            .documentName(messageSource.getDocumentName() != null ? messageSource.getDocumentName() : "Unknown")
+            .documentId(docId)
+            .documentName(docName)
             .pageNumber(messageSource.getPageNumber())
-            .snippet(messageSource.getSnippet())
+            .snippet(snippet)
             .relevanceScore(messageSource.getRelevanceScore())
             .build();
     }

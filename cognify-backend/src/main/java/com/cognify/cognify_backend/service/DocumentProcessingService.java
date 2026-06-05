@@ -88,14 +88,20 @@ public class DocumentProcessingService {
                 if (success) {
                     Number totalChunksNumber = (Number) body.get("total_chunks");
                     int totalChunks = totalChunksNumber != null ? totalChunksNumber.intValue() : 0;
-                    log.info("Python service processed document into {} chunks", totalChunks);
+
+                    // indexed_chunks = chunks that passed the quality gate and were embedded.
+                    // total_chunks = raw extraction count before the gate (may be higher).
+                    // Use indexed_chunks for the document record so the UI shows the real count.
+                    Number indexedChunksNumber = (Number) body.get("indexed_chunks");
+                    int indexedChunks = indexedChunksNumber != null ? indexedChunksNumber.intValue() : totalChunks;
+                    log.info("Python service indexed {}/{} chunks for document", indexedChunks, totalChunks);
 
                     List<Map<String, Object>> chunksListData = (List<Map<String, Object>>) body.get("chunks");
                     saveChunks(document.getId(), chunksListData);
 
                     // Update document status to INDEXED
                     document.setStatus(Document.DocumentStatus.INDEXED);
-                    document.setChunksCount(totalChunks);
+                    document.setChunksCount(indexedChunks);
                     document.setIndexedAt(LocalDateTime.now());
                     document.setSummary("Document processed and indexed successfully via Local AI Service.");
                     document.setTags(new String[]{"processed", "local-ai"});

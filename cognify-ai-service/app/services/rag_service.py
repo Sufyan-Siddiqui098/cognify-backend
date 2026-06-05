@@ -15,6 +15,7 @@ from app.services.query_signals import (
 )
 import re
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,7 +79,6 @@ class RAGService:
                         if len((r.get("metadata", {}).get("content") or "").strip()) >= min_len
                     ]
 
-        filtered = self._drop_low_quality_chunks(filtered)
         filtered = self._order_results(filtered, query)
         return filtered[:top_k]
 
@@ -86,34 +86,6 @@ class RAGService:
     def _chunk_text(result: Dict) -> str:
         return (result.get("metadata", {}).get("content") or "").strip()
 
-    @staticmethod
-    def _is_low_quality_chunk(result: Dict) -> bool:
-        content = RAGService._chunk_text(result)
-        if not content:
-            return True
-        if content.count("-----") >= 2:
-            return True
-        header_count = len(re.findall(r"^#+\s", content, re.MULTILINE))
-        if header_count >= 6 and len(content) < 500:
-            return True
-        if re.search(r"##\s*computer\.?\s*\n+\s*computer\.?", content, re.IGNORECASE):
-            return True
-        words = re.findall(r"[a-zA-Z]{3,}", content)
-        if len(words) >= 8:
-            short_words = sum(1 for w in words if len(w) <= 3)
-            if short_words / len(words) > 0.45:
-                return True
-        return False
-
-    def _drop_low_quality_chunks(self, results: List[Dict]) -> List[Dict]:
-        kept = [r for r in results if not self._is_low_quality_chunk(r)]
-        if kept:
-            removed = len(results) - len(kept)
-            if removed:
-                logger.info("Filtered %d low-quality retrieval chunks", removed)
-            return kept
-        logger.warning("All retrieval chunks looked low-quality; keeping original set")
-        return results
 
     @staticmethod
     def _primary_document_id(results: List[Dict], query: str) -> Optional[str]:
@@ -210,11 +182,12 @@ class RAGService:
                     "Here's what we found in your documents (without AI reformulation):"
                 )
             
+            # Return just the status message as plain text.
+            # The frontend detects ⏳/❌ emoji to render the correct status card.
+            # Evidence is already covered by message.sources[] — no TOP MATCHES
+            # block needed in message.content.
             return {
-                "response": self.llm_service.compose_structured_response(
-                    self.llm_service._extract_source_chunks(context),
-                    fallback_message
-                ),
+                "response": fallback_message,
                 "model": "fallback-context",
                 "error_reason": e.reason,
                 "usage": {
@@ -223,3 +196,4 @@ class RAGService:
                     "total_tokens": 0,
                 },
             }
+

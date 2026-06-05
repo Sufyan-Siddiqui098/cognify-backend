@@ -16,6 +16,6 @@ public class SourceChunkDto {
     private UUID documentId;
     private String documentName;
     private Integer pageNumber;
-    private String snippet; // First 200 chars of chunk
+    private String snippet; // Full chunk content (TEXT column, no length limit)
     private Float relevanceScore;
 }

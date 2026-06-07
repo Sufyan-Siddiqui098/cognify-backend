@@ -22,7 +22,10 @@ public class RestTemplateConfig {
     public RestTemplate restTemplate(RestTemplateBuilder builder) {
     SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
     requestFactory.setConnectTimeout((int) Duration.ofSeconds(10).toMillis());
-    requestFactory.setReadTimeout((int) Duration.ofMinutes(3).toMillis());
+    // 7 minutes: Python's worst-case LLM retry cycle is ~362s
+    // (300s first-attempt timeout + 2s delay + 60s retry timeout).
+    // Previously 3 min caused Java to cut off before Python finished, saving ❌ instead of the answer.
+    requestFactory.setReadTimeout((int) Duration.ofMinutes(7).toMillis());
 
     RestTemplate restTemplate = builder
         .requestFactory(() -> requestFactory)

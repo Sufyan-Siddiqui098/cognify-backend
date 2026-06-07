@@ -87,8 +87,7 @@ class LLMService:
     ) -> Dict[str, any]:
         """Generate response with retry logic and exponential backoff."""
         
-        # Use longer timeout for first request (model loading), shorter for subsequent
-        timeout = self.timeout_first_request if self._first_request else self.timeout_subsequent
+        # Timeout is assigned per-attempt inside the loop (see below).
         attempt = 0
         last_error = None
 
@@ -99,6 +98,16 @@ class LLMService:
                     wait_time = self.retry_delay * (2 ** (attempt - 1))
                     logger.info(f"Retry attempt {attempt}/{self.request_retries} after {wait_time}s...")
                     time.sleep(wait_time)
+
+                # Attempt 0 uses the first-request timeout (model may be cold-loading).
+                # Retry attempts always use the shorter subsequent timeout: after a 300s
+                # first-attempt timeout, Ollama has been computing for 300s and the model
+                # is already warm. Re-using 300s on retries is wasteful and inflates the
+                # worst-case total beyond what Java's readTimeout can accommodate.
+                if self._first_request and attempt == 0:
+                    timeout = self.timeout_first_request
+                else:
+                    timeout = self.timeout_subsequent
 
                 logger.info(
                     f"Generating response with {self.model} (attempt {attempt + 1}/{self.request_retries + 1}, "

@@ -229,6 +229,7 @@ async def generate_rag_response(request: RAGGenerateRequest):
             request.temperature,
             request.max_tokens
         )
+        logger.info("RAG generation completed")
         return RAGGenerateResponse(**result)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)

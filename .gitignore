@@ -1,0 +1,62 @@
+# Root .gitignore for Cognify Backend
+
+# IDE & Editor files
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# Java & Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+.mvn/wrapper/maven-wrapper.jar
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Virtual Environments & Secrets
+venv/
+env/
+ENV/
+.env
+.env.local
+
+# Local Data, Storage & Large Volumes
+uploads/
+*/uploads/
+ollama_data/
+*/ollama_data/
+qdrant_storage/
+*/qdrant_storage/
+
+# Logs
+*.log
+logs/
+*/logs/
